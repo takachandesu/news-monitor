@@ -23,6 +23,18 @@ import streamlit.components.v1 as components
 # -----------------------------
 st.set_page_config(page_title="News Headline Monitor", layout="wide")
 
+
+# -----------------------------
+# Password gate (disabled: public access)
+# -----------------------------
+def _check_password() -> bool:
+    """パスワード保護無効化（誰でも閲覧可）"""
+    return True
+
+
+_check_password()
+
+
 BASE_CSS = """
 <style>
 /* 全体余白 */
@@ -2064,16 +2076,17 @@ st.markdown("<hr />", unsafe_allow_html=True)
 #                                          "OANDA:NAS100USD" / "NASDAQ:NDX" (US時間のみ)
 #   ドル円:           "FX:USDJPY"        → "OANDA:USDJPY" / "FX_IDC:USDJPY"
 _CHART_SPECS = [
-    ("日経225 (CFD)",         "OANDA:JP225USD",   "overview"),  # CFD: ほぼ24h リアルタイム
-    ("NASDAQ100 先物 (24h)", "FOREXCOM:NAS100",  "overview"),
-    ("ドル円 (USD/JPY)",      "FX:USDJPY",        "overview"),
+    ("日経平均（24h CFD）",  "OANDA:JP225USD",   "overview"),  # 日本株価指数（CFD、ほぼ24h リアルタイム）
+    ("NASDAQ100先物",         "FOREXCOM:NAS100",  "overview"),  # 米ハイテク株指数先物
+    ("ドル円",                "FX:USDJPY",        "overview"),  # USD/JPY
 ]
 
 
-def _tv_widget_block(symbol: str, kind: str = "mini") -> str:
+def _tv_widget_block(symbol: str, kind: str = "mini", color_theme: str = "light") -> str:
     """
     kind = "mini"     : embed-widget-mini-symbol-overview.js（コンパクト・チャート＋%）
     kind = "overview" : embed-widget-symbol-overview.js     （% 表示が確実だが少し大きめ）
+    color_theme       : "light" or "dark"
     """
     if kind == "overview":
         cfg = {
@@ -2082,7 +2095,7 @@ def _tv_widget_block(symbol: str, kind: str = "mini") -> str:
             "width": "100%",
             "height": "220",
             "locale": "ja",
-            "colorTheme": "dark",
+            "colorTheme": color_theme,
             "isTransparent": True,
             "autosize": False,
             "showVolume": False,
@@ -2101,7 +2114,7 @@ def _tv_widget_block(symbol: str, kind: str = "mini") -> str:
             "height": "220",
             "locale": "ja",
             "dateRange": "1D",
-            "colorTheme": "dark",
+            "colorTheme": color_theme,
             "isTransparent": True,
             "autosize": False,
             "chartOnly": False,
@@ -2129,19 +2142,116 @@ def _tv_widget_block(symbol: str, kind: str = "mini") -> str:
 #    - font-size: clamp(9px, 1.6vw, 13px)
 #                          → ラベル文字も画面幅に応じて自動スケール（9〜13px）。
 #                            狭い画面では「NASDAQ100 先物 (24h)」も省略されずに収まる。
-_charts_html = (
-    '<div style="display:flex; gap:6px; width:100%; flex-wrap:nowrap; '
-    'align-items:flex-start; margin-bottom:6px;">'
-    + "".join(
-        f'<div style="flex:1 1 0; min-width:0; overflow:hidden;">'
-        f'<div style="font-size:clamp(9px,1.6vw,13px); opacity:0.7; margin:0 0 2px 2px; '
-        f'white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">{label}</div>'
-        f"{_tv_widget_block(sym, kind)}"
-        f"</div>"
+#
+# ★ ライト/ダーク自動切替:
+#    - 親フレーム（iframe 埋め込み先 = WordPress など）の背景色を JS で検知し、
+#      明るければ TradingView を "light" テーマで、暗ければ "dark" テーマで描画する。
+#    - 検知に失敗した場合（クロスオリジン制限など）は OS の prefers-color-scheme を使う。
+#    - ラベル文字色も検知した theme に応じて切り替え（白背景でも黒背景でも読める色）。
+
+# ── ① 各銘柄を「light 版」と「dark 版」両方とも事前生成して JS に渡す ───────────
+# JS 側で適切なテーマを選んで innerHTML に流し込む。
+_chart_payloads_json = json.dumps(
+    [
+        {
+            "label": label,
+            "light_html": _tv_widget_block(sym, kind, color_theme="light"),
+            "dark_html":  _tv_widget_block(sym, kind, color_theme="dark"),
+        }
         for label, sym, kind in _CHART_SPECS
-    )
-    + "</div>"
+    ],
+    ensure_ascii=False,
 )
+
+_charts_html = f"""
+<style>
+  /* デフォルト（テーマ未確定時）はライト寄り */
+  :root[data-tv-theme="light"] {{
+      --tv-label-fg: #31333f;     /* 濃いグレー（白背景で可読） */
+  }}
+  :root[data-tv-theme="dark"] {{
+      --tv-label-fg: #e6e6e6;     /* 明るいグレー（黒背景で可読） */
+  }}
+  #tv-charts-wrap {{
+      display: flex;
+      gap: 6px;
+      width: 100%;
+      flex-wrap: nowrap;
+      align-items: flex-start;
+      margin-bottom: 6px;
+  }}
+  #tv-charts-wrap > .tv-col {{
+      flex: 1 1 0;
+      min-width: 0;
+      overflow: hidden;
+  }}
+  #tv-charts-wrap .tv-label {{
+      font-size: clamp(10px, 1.6vw, 13px);
+      font-weight: 600;
+      color: var(--tv-label-fg);
+      margin: 0 0 2px 2px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+  }}
+</style>
+<div id="tv-charts-wrap"></div>
+<script>
+(function() {{
+    const PAYLOADS = {_chart_payloads_json};
+    const wrap = document.getElementById('tv-charts-wrap');
+
+    // --- 背景色を親フレームから検知（クロスオリジンならOS設定をフォールバック）---
+    function detectTheme() {{
+        try {{
+            const bg = window.getComputedStyle(window.parent.document.body).backgroundColor;
+            const m = bg.match(/\\d+/g);
+            if (m && m.length >= 3) {{
+                const r = parseInt(m[0]), g = parseInt(m[1]), b = parseInt(m[2]);
+                const luminance = (r*299 + g*587 + b*114) / 1000;
+                return luminance < 128 ? 'dark' : 'light';
+            }}
+        }} catch (e) {{
+            // クロスオリジンで親body読めない場合
+        }}
+        // フォールバック: OS設定
+        if (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) {{
+            return 'dark';
+        }}
+        return 'light';
+    }}
+
+    const theme = detectTheme();
+    document.documentElement.setAttribute('data-tv-theme', theme);
+
+    // 各チャートを描画
+    PAYLOADS.forEach(function(p) {{
+        const col = document.createElement('div');
+        col.className = 'tv-col';
+
+        const label = document.createElement('div');
+        label.className = 'tv-label';
+        label.textContent = p.label;
+        col.appendChild(label);
+
+        const holder = document.createElement('div');
+        holder.innerHTML = theme === 'dark' ? p.dark_html : p.light_html;
+        // innerHTML経由で挿入した<script>はブラウザに実行されないので、生成しなおす
+        holder.querySelectorAll('script').forEach(function(oldScript) {{
+            const newScript = document.createElement('script');
+            for (const attr of oldScript.attributes) {{
+                newScript.setAttribute(attr.name, attr.value);
+            }}
+            newScript.text = oldScript.text;
+            oldScript.parentNode.replaceChild(newScript, oldScript);
+        }});
+        col.appendChild(holder);
+
+        wrap.appendChild(col);
+    }});
+}})();
+</script>
+"""
 
 components.html(_charts_html, height=270)
 
