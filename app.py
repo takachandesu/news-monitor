@@ -23,16 +23,6 @@ import streamlit.components.v1 as components
 # -----------------------------
 st.set_page_config(page_title="News Headline Monitor", layout="wide")
 
-# -----------------------------
-# 簡易パスワードゲート
-# -----------------------------
-def _check_password() -> bool:
-    """パスワード保護無効化（誰でも閲覧可）"""
-    return True
-
-
-_check_password()
-
 BASE_CSS = """
 <style>
 /* 全体余白 */
