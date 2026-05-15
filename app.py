@@ -2151,6 +2151,10 @@ def _tv_widget_block(symbol: str, kind: str = "mini", color_theme: str = "light"
 
 # ── ① 各銘柄を「light 版」と「dark 版」両方とも事前生成して JS に渡す ───────────
 # JS 側で適切なテーマを選んで innerHTML に流し込む。
+#
+# ⚠️ 注意: 各 HTML には <script> タグが含まれるため、そのまま </script> が
+#   先頭の <script> に対する閉じタグとしてブラウザに解釈されてしまう。
+#   よって JSON 出力後に '<' '>' '/' を \u エスケープして安全に埋め込む。
 _chart_payloads_json = json.dumps(
     [
         {
@@ -2162,16 +2166,18 @@ _chart_payloads_json = json.dumps(
     ],
     ensure_ascii=False,
 )
+# <script> タグの解釈ぶつかりを防ぐ
+_chart_payloads_json = (
+    _chart_payloads_json
+    .replace("<", "\\u003c")
+    .replace(">", "\\u003e")
+    .replace("&", "\\u0026")
+)
 
 # f-string を使わず文字列連結で構築（JS 内の `{` `}` のエスケープ問題を完全回避）
 _charts_html = """
 <style>
-  :root[data-tv-theme="light"] {
-      --tv-label-fg: #31333f;
-  }
-  :root[data-tv-theme="dark"] {
-      --tv-label-fg: #e6e6e6;
-  }
+  /* ラベルは背景色に関わらず黄色固定（白背景・黒背景どちらでも見える濃い黄色） */
   #tv-charts-wrap {
       display: flex;
       gap: 6px;
@@ -2186,9 +2192,12 @@ _charts_html = """
       overflow: hidden;
   }
   #tv-charts-wrap .tv-label {
-      font-size: clamp(10px, 1.6vw, 13px);
-      font-weight: 600;
-      color: var(--tv-label-fg);
+      font-size: clamp(11px, 1.6vw, 14px);
+      font-weight: 700;
+      color: #f5b400;                      /* 黄色（濃いめ・両背景対応） */
+      text-shadow:
+          0 0 2px rgba(0,0,0,0.6),
+          1px 1px 2px rgba(0,0,0,0.4);    /* 黒い影で白背景でも視認性確保 */
       margin: 0 0 2px 2px;
       white-space: nowrap;
       overflow: hidden;
