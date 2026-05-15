@@ -23,6 +23,38 @@ import streamlit.components.v1 as components
 # -----------------------------
 st.set_page_config(page_title="News Headline Monitor", layout="wide")
 
+# -----------------------------
+# 簡易パスワードゲート
+# -----------------------------
+def _check_password() -> bool:
+    """セッション単位の簡易認証。正解するまで以降の処理をブロックする。"""
+    # 既に認証済み
+    if st.session_state.get("auth_ok"):
+        return True
+
+    # Secrets からパスワード取得（無ければゲートを無効化＝素通し）
+    try:
+        correct = st.secrets["auth"]["password"]
+    except Exception:
+        return True  # ローカル開発時など、未設定なら認証スキップ
+
+    # ログインフォーム
+    st.markdown("## 🔒 News Monitor")
+    st.caption("閲覧にはパスワードが必要です。")
+
+    pw = st.text_input("パスワード", type="password", key="pw_input")
+    if st.button("ログイン", type="primary"):
+        if pw == correct:
+            st.session_state["auth_ok"] = True
+            st.rerun()
+        else:
+            st.error("パスワードが違います。")
+
+    st.stop()  # 認証が通るまでここで処理を止める
+
+
+_check_password()
+
 BASE_CSS = """
 <style>
 /* 全体余白 */
