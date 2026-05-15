@@ -2023,29 +2023,10 @@ if not data_snapshot:
     st.stop()
 
 # -----------------------------
-# Tabs (radio)
+# Tabs (radio) — 削除済み: 常に All（全部まとめ）固定表示
 # -----------------------------
-tab_labels = [
-    "All（全部まとめ）",
-    "All（8本まとめ）",
-    "All（7本まとめ）",
-    "nikkei225jp（集約）",
-    "Bloomberg 英語（Google News）",
-    "Bloomberg 日本語（Google News）",
-    "Reuters 英語（Google News）",
-    "Reuters 日本語（Google News）",
-    "日経（Google News）",
-    "日経（Cookie認証）",
-    "日本証券新聞（速報・市況）",
-    "WSJ（Google News）",
-    "WSJ日本語（Google News）",
-    "TBS NEWS DIG（Bloomberg）",
-    "SBI証券（ファンドレポート）",
-    "X トレンド（カテゴリ別）",
-    "X 4アカウント（まとめ）",
-    "X ホームタイムライン",
-]
-selected = st.radio("tabs", tab_labels, horizontal=True, label_visibility="collapsed")
+# 以前は st.radio で複数タブを切り替えていたが、シンプル化のため削除。
+# 常に "all_full"（全ソース統合）のニュースを表示する。
 
 st.markdown("<hr />", unsafe_allow_html=True)
 
@@ -2139,22 +2120,16 @@ def _tv_widget_block(symbol: str, kind: str = "mini", color_theme: str = "light"
 #    - flex: 1 1 0         → 3つが等幅で伸縮（残り幅を 1:1:1 で分配）
 #    - min-width: 0        → 子要素が伸びすぎて折り返されるのを防ぐ
 #    - overflow: hidden    → ラベルが長くてもレイアウト崩れを防ぐ
-#    - font-size: clamp(9px, 1.6vw, 13px)
-#                          → ラベル文字も画面幅に応じて自動スケール（9〜13px）。
-#                            狭い画面では「NASDAQ100 先物 (24h)」も省略されずに収まる。
 #
 # ★ ライト/ダーク自動切替:
-#    - 親フレーム（iframe 埋め込み先 = WordPress など）の背景色を JS で検知し、
-#      明るければ TradingView を "light" テーマで、暗ければ "dark" テーマで描画する。
-#    - 検知に失敗した場合（クロスオリジン制限など）は OS の prefers-color-scheme を使う。
-#    - ラベル文字色も検知した theme に応じて切り替え（白背景でも黒背景でも読める色）。
-
-# ── ① 各銘柄を「light 版」と「dark 版」両方とも事前生成して JS に渡す ───────────
-# JS 側で適切なテーマを選んで innerHTML に流し込む。
+#    - 親フレーム背景色を JS で検知して TradingView を light/dark で起動。
+#    - クロスオリジン時は OS の prefers-color-scheme をフォールバック。
 #
-# ⚠️ 注意: 各 HTML には <script> タグが含まれるため、そのまま </script> が
-#   先頭の <script> に対する閉じタグとしてブラウザに解釈されてしまう。
-#   よって JSON 出力後に '<' '>' '/' を \u エスケープして安全に埋め込む。
+# ★ ラベル色:
+#    - 背景に関わらず黄色固定（#f5b400 + 黒影で両背景対応）
+
+# ── 各銘柄を「light 版」「dark 版」両方とも事前生成して JS に渡す ───────────
+# ⚠️ JSON内の<script>タグが先頭<script>を誤閉じしないよう '<' '>' '&' をエスケープ
 _chart_payloads_json = json.dumps(
     [
         {
@@ -2166,7 +2141,6 @@ _chart_payloads_json = json.dumps(
     ],
     ensure_ascii=False,
 )
-# <script> タグの解釈ぶつかりを防ぐ
 _chart_payloads_json = (
     _chart_payloads_json
     .replace("<", "\\u003c")
@@ -2177,7 +2151,6 @@ _chart_payloads_json = (
 # f-string を使わず文字列連結で構築（JS 内の `{` `}` のエスケープ問題を完全回避）
 _charts_html = """
 <style>
-  /* ラベルは背景色に関わらず黄色固定（白背景・黒背景どちらでも見える濃い黄色） */
   #tv-charts-wrap {
       display: flex;
       gap: 6px;
@@ -2194,10 +2167,10 @@ _charts_html = """
   #tv-charts-wrap .tv-label {
       font-size: clamp(11px, 1.6vw, 14px);
       font-weight: 700;
-      color: #f5b400;                      /* 黄色（濃いめ・両背景対応） */
+      color: #f5b400;
       text-shadow:
           0 0 2px rgba(0,0,0,0.6),
-          1px 1px 2px rgba(0,0,0,0.4);    /* 黒い影で白背景でも視認性確保 */
+          1px 1px 2px rgba(0,0,0,0.4);
       margin: 0 0 2px 2px;
       white-space: nowrap;
       overflow: hidden;
@@ -2259,149 +2232,6 @@ _charts_html = """
 components.html(_charts_html, height=270)
 
 # -----------------------------
-# Render selected tab
+# Render: 常に「All（全部まとめ）」のニュース一覧のみ表示
 # -----------------------------
-if selected == "All（全部まとめ）":
-    st.subheader("All（全部まとめ）")
-    st.caption("Bloomberg EN/JP・Reuters EN/JP・日経・日本証券新聞・WSJ・nikkei225jp を統合表示します。")
-    _render_news_fragment("all_full")
-
-elif selected == "All（8本まとめ）":
-    st.subheader("All（8本まとめ）")
-    st.caption("All（7本まとめ）＋ nikkei225jp（集約） をまとめて表示します。")
-    _render_news_fragment("all_8")
-
-elif selected == "All（7本まとめ）":
-    st.subheader("All（7本まとめ）")
-    st.caption("Bloomberg EN/JP・Reuters JP・日経・日本証券新聞・WSJ・WSJ日本語 をまとめて表示します。")
-    _render_news_fragment("all_7")
-
-elif selected == "nikkei225jp（集約）":
-    st.subheader("nikkei225jp（集約）")
-    st.caption("nikkei225jp.com の News_ALL1.js を取得して表示します（サイト側仕様変更で壊れる可能性あり）。")
-
-    with st.expander("取得先URL・解析状況（確認用）"):
-        dbg = data_snapshot.get("nikkei225jp_debug", {}) or {}
-        st.code(
-            "fetched_url: " + str(dbg.get("fetched_url")) + "\n"
-            "status: " + str(dbg.get("status")) + "\n"
-            "content_length: " + str(dbg.get("len")) + "\n"
-            "News[...] matches: " + str(dbg.get("matches")) + "\n"
-        )
-
-    _render_news_fragment("nikkei225jp_items")
-
-elif selected == "Bloomberg 英語（Google News）":
-    st.subheader("Bloomberg 英語（Google News）")
-    st.caption("Google News RSS（英語）: site:bloomberg.com / Markets・Politics・Technology・Economy")
-    _render_news_fragment("bloomberg_en")
-
-elif selected == "Bloomberg 日本語（Google News）":
-    st.subheader("Bloomberg 日本語（Google News）")
-    st.caption("Google News RSS: site:bloomberg.co.jp ＋ site:bloomberg.com/japanese ＋ bloomberg.com/jp")
-    _render_news_fragment("bloomberg_ja")
-
-elif selected == "Reuters 英語（Google News）":
-    st.subheader("Reuters 英語（Google News）")
-    st.caption("Google News RSS（英語）: site:reuters.com / Markets・Business・Technology・World")
-    _render_news_fragment("reuters_en")
-
-elif selected == "Reuters 日本語（Google News）":
-    st.subheader("Reuters 日本語")
-    st.caption("jp.reuters.com 直接取得（RSS → スクレイピング）＋ Google News RSS: site:reuters.com OR site:jp.reuters.com")
-    _render_news_fragment("reuters_ja")
-
-elif selected == "日経（Google News）":
-    st.subheader("日経（Google News）")
-    st.caption("Google News RSS: site:nikkei.com")
-    _render_news_fragment("nikkei")
-
-elif selected == "日経（Cookie認証）":
-    st.subheader("日経（Cookie認証スクレイピング）")
-    st.caption(f"状態: {nikkei_cookie_status()} ／ 取得ページ: マーケット・国内株・海外株・為替・経済")
-    if not data_snapshot.get("nikkei_cookie"):
-        st.warning(
-            "nikkei_cookies.json が見つからないか、記事が取得できませんでした。\n\n"
-            "**設定手順:**\n"
-            "1. ChromeでNikkei.comにログイン\n"
-            "2. F12 → Application → Cookies → https://www.nikkei.com\n"
-            "3. `RNikkeiAuth`・`RNikkeiUserInfo` をコピー\n"
-            "4. `nikkei_cookies.json` を app.py と同じフォルダに作成:\n"
-            '```json\n{"RNikkeiAuth":"xxx","RNikkeiUserInfo":"xxx"}\n```'
-        )
-    _render_news_fragment("nikkei_cookie")
-
-elif selected == "日本証券新聞（速報・市況）":
-    st.subheader("日本証券新聞（速報・市況）")
-    st.caption(f"URL: {data_snapshot.get('nsj_url','')}")
-    _render_news_fragment("nsj")
-
-elif selected == "WSJ（Google News）":
-    st.subheader("WSJ（Google News）")
-    st.caption("Google News RSS: site:wsj.com（英語）")
-    _render_news_fragment("wsj_en")
-
-elif selected == "WSJ日本語（Google News）":
-    st.subheader("WSJ日本語（Google News）")
-    st.caption("Google News RSS: site:jp.wsj.com（日本語）")
-    _render_news_fragment("wsj_ja")
-
-elif selected == "TBS NEWS DIG（Bloomberg）":
-    st.subheader("TBS NEWS DIG（Bloomberg）")
-    st.caption("https://newsdig.tbs.co.jp/list/withbloomberg/news を直接スクレイピングして一覧表示します。")
-    _render_news_fragment("tbs_bloomberg")
-
-elif selected == "SBI証券（ファンドレポート）":
-    st.subheader("SBI証券（ファンドレポート）")
-    st.caption(
-        "SBI証券のファンドレポート一覧をスクレイピングして表示します。\n\n"
-        "URL: https://www.sbisec.co.jp/.../fund_report.html"
-    )
-    _render_news_fragment("sbi_fund")
-
-elif selected == "X トレンド（カテゴリ別）":
-    st.subheader("X トレンド（米株 / 日本株 / 為替 / 政治 / 経済）")
-    st.caption(
-        "trends24.in / getdaytrends.com から日本のXトレンドキーワードのみを取得し、"
-        "**米株・日本株・為替・政治・経済** に該当するトレンド単語だけを抽出して表示します。\n\n"
-        "※ X 本体の API 認証は不要です（公開トレンドサイトをスクレイピング）。\n"
-        "※ 各キーワードをクリックすると X の検索結果（最新タブ）に遷移します。"
-    )
-    _render_news_fragment("x_trends")
-
-elif selected == "X 4アカウント（まとめ）":
-    st.subheader("X 4アカウント（まとめ）")
-    st.caption(
-        "**@BloombergJapan**（bloomberg.co.jp）・**@business**（bloomberg.com）・"
-        "**@ReutersJapan**（jp.reuters.com）・**@Reuters**（reuters.com）の4ソースを統合表示します。\n\n"
-        "※ X API は使用していません。各社の公式サイトRSS・直接取得・Google Newsを組み合わせています。"
-    )
-    _render_news_fragment("x_4accounts")
-
-elif selected == "X ホームタイムライン":
-    st.subheader("X ホームタイムライン")
-    st.caption(f"認証状態: {x_credential_status()}")
-    if not data_snapshot.get("x_home"):
-        st.warning(
-            "x_credentials.json が見つからないか、ツイートを取得できませんでした。\n\n"
-            "**設定手順:**\n"
-            "1. [X Developer Portal](https://developer.twitter.com/en/portal/dashboard) でアプリを作成\n"
-            "2. 「Keys and Tokens」タブから以下の4種類のキーを取得:\n"
-            "   - API Key（Consumer Key）\n"
-            "   - API Key Secret（Consumer Secret）\n"
-            "   - Access Token\n"
-            "   - Access Token Secret\n"
-            "3. 「Free」プランでも取得可能ですが、**ホームTLには Basic 以上**が必要です\n"
-            "4. `x_credentials.json` を app.py と同じフォルダに作成:\n"
-            '```json\n'
-            '{\n'
-            '  "api_key":             "YOUR_API_KEY",\n'
-            '  "api_secret":          "YOUR_API_KEY_SECRET",\n'
-            '  "access_token":        "YOUR_ACCESS_TOKEN",\n'
-            '  "access_token_secret": "YOUR_ACCESS_TOKEN_SECRET",\n'
-            '  "bearer_token":        "YOUR_BEARER_TOKEN"\n'
-            '}\n'
-            '```\n'
-            "5. `pip install tweepy` を実行してから再起動してください"
-        )
-    _render_news_fragment("x_home")
+_render_news_fragment("all_full")
