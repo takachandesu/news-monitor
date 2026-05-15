@@ -2163,29 +2163,29 @@ _chart_payloads_json = json.dumps(
     ensure_ascii=False,
 )
 
-_charts_html = f"""
+# f-string を使わず文字列連結で構築（JS 内の `{` `}` のエスケープ問題を完全回避）
+_charts_html = """
 <style>
-  /* デフォルト（テーマ未確定時）はライト寄り */
-  :root[data-tv-theme="light"] {{
-      --tv-label-fg: #31333f;     /* 濃いグレー（白背景で可読） */
-  }}
-  :root[data-tv-theme="dark"] {{
-      --tv-label-fg: #e6e6e6;     /* 明るいグレー（黒背景で可読） */
-  }}
-  #tv-charts-wrap {{
+  :root[data-tv-theme="light"] {
+      --tv-label-fg: #31333f;
+  }
+  :root[data-tv-theme="dark"] {
+      --tv-label-fg: #e6e6e6;
+  }
+  #tv-charts-wrap {
       display: flex;
       gap: 6px;
       width: 100%;
       flex-wrap: nowrap;
       align-items: flex-start;
       margin-bottom: 6px;
-  }}
-  #tv-charts-wrap > .tv-col {{
+  }
+  #tv-charts-wrap > .tv-col {
       flex: 1 1 0;
       min-width: 0;
       overflow: hidden;
-  }}
-  #tv-charts-wrap .tv-label {{
+  }
+  #tv-charts-wrap .tv-label {
       font-size: clamp(10px, 1.6vw, 13px);
       font-weight: 600;
       color: var(--tv-label-fg);
@@ -2193,39 +2193,34 @@ _charts_html = f"""
       white-space: nowrap;
       overflow: hidden;
       text-overflow: ellipsis;
-  }}
+  }
 </style>
 <div id="tv-charts-wrap"></div>
 <script>
-(function() {{
-    const PAYLOADS = {_chart_payloads_json};
+(function() {
+    const PAYLOADS = __PAYLOADS_JSON__;
     const wrap = document.getElementById('tv-charts-wrap');
 
-    // --- 背景色を親フレームから検知（クロスオリジンならOS設定をフォールバック）---
-    function detectTheme() {{
-        try {{
+    function detectTheme() {
+        try {
             const bg = window.getComputedStyle(window.parent.document.body).backgroundColor;
             const m = bg.match(/\\d+/g);
-            if (m && m.length >= 3) {{
+            if (m && m.length >= 3) {
                 const r = parseInt(m[0]), g = parseInt(m[1]), b = parseInt(m[2]);
                 const luminance = (r*299 + g*587 + b*114) / 1000;
                 return luminance < 128 ? 'dark' : 'light';
-            }}
-        }} catch (e) {{
-            // クロスオリジンで親body読めない場合
-        }}
-        // フォールバック: OS設定
-        if (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) {{
+            }
+        } catch (e) {}
+        if (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) {
             return 'dark';
-        }}
+        }
         return 'light';
-    }}
+    }
 
     const theme = detectTheme();
     document.documentElement.setAttribute('data-tv-theme', theme);
 
-    // 各チャートを描画
-    PAYLOADS.forEach(function(p) {{
+    PAYLOADS.forEach(function(p) {
         const col = document.createElement('div');
         col.className = 'tv-col';
 
@@ -2236,22 +2231,21 @@ _charts_html = f"""
 
         const holder = document.createElement('div');
         holder.innerHTML = theme === 'dark' ? p.dark_html : p.light_html;
-        // innerHTML経由で挿入した<script>はブラウザに実行されないので、生成しなおす
-        holder.querySelectorAll('script').forEach(function(oldScript) {{
+        holder.querySelectorAll('script').forEach(function(oldScript) {
             const newScript = document.createElement('script');
-            for (const attr of oldScript.attributes) {{
+            for (const attr of oldScript.attributes) {
                 newScript.setAttribute(attr.name, attr.value);
-            }}
+            }
             newScript.text = oldScript.text;
             oldScript.parentNode.replaceChild(newScript, oldScript);
-        }});
+        });
         col.appendChild(holder);
 
         wrap.appendChild(col);
-    }});
-}})();
+    });
+})();
 </script>
-"""
+""".replace("__PAYLOADS_JSON__", _chart_payloads_json)
 
 components.html(_charts_html, height=270)
 
