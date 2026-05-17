@@ -438,11 +438,13 @@ def fetch_nikkei225jp_news_all1() -> Dict[str, object]:
         if not title:
             continue
 
-        source = "nikkei225jp"
+        # 出典: サブ媒体名があればそれだけを表示（"nikkei225jp/" 接頭辞は付けない）。
+        #       サブ媒体名が無ければ空欄にする。
+        source = ""
         if url_idx - 1 >= 0:
             s = parts[url_idx - 1]
             if s and len(s) <= 30 and "http" not in s.lower() and not re.fullmatch(r"\d+", s):
-                source = f"nikkei225jp/{s}"
+                source = s
 
         items.append({"source": source, "title": title, "url": url, "published": normalize_dt(published)})
 
@@ -617,9 +619,7 @@ def fetch_bloomberg_en_all() -> List[Dict]:
 #   Google News RSS 経由で site:指定により各カテゴリの記事を取得。
 # ============================================================
 def fetch_yomiuri() -> List[Dict]:
-    """
-    読売新聞: 政治 / 経済 / 海外 の3カテゴリを Google News 経由で取得。
-    """
+    """読売新聞: 政治 / 経済 / 海外 の3カテゴリを Google News 経由で取得。"""
     items: List[Dict] = []
     queries = [
         ("site:yomiuri.co.jp/politics", "読売新聞／政治"),
@@ -637,9 +637,7 @@ def fetch_yomiuri() -> List[Dict]:
 
 
 def fetch_sankei() -> List[Dict]:
-    """
-    産経新聞: 経済 / 政治 の2カテゴリを Google News 経由で取得。
-    """
+    """産経新聞: 経済 / 政治 の2カテゴリを Google News 経由で取得。"""
     items: List[Dict] = []
     queries = [
         ("site:sankei.com/economy",  "産経新聞／経済"),
@@ -2162,12 +2160,6 @@ def _tv_widget_block(symbol: str, kind: str = "mini", color_theme: str = "light"
 
 
 # ★ チャート3つを横並び表示。テーマ自動切替＋黄色ラベル。
-#    - flex:1 1 0 で等幅、画面が狭くても折り返さない
-#    - 親フレーム背景色を JS 検知して TradingView を light/dark で起動
-#    - ラベルは黄色固定（#f5b400 + 黒影）
-
-# ── 各銘柄を light/dark 両方生成して JS に渡す ───────────
-# ⚠️ JSON内の<script>タグが先頭<script>を誤閉じしないよう '<' '>' '&' をエスケープ
 _chart_payloads_json = json.dumps(
     [
         {
@@ -2186,7 +2178,6 @@ _chart_payloads_json = (
     .replace("&", "\\u0026")
 )
 
-# f-string を使わず文字列連結で構築（JS 内の `{` `}` のエスケープ問題を回避）
 _charts_html = """
 <style>
   #tv-charts-wrap {
