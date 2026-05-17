@@ -613,6 +613,49 @@ def fetch_bloomberg_en_all() -> List[Dict]:
 
 
 # ============================================================
+# ★ 追加: 読売新聞（政治・経済・海外） / 産経新聞（経済・政治）
+#   Google News RSS 経由で site:指定により各カテゴリの記事を取得。
+# ============================================================
+def fetch_yomiuri() -> List[Dict]:
+    """
+    読売新聞: 政治 / 経済 / 海外 の3カテゴリを Google News 経由で取得。
+    """
+    items: List[Dict] = []
+    queries = [
+        ("site:yomiuri.co.jp/politics", "読売新聞／政治"),
+        ("site:yomiuri.co.jp/economy",  "読売新聞／経済"),
+        ("site:yomiuri.co.jp/world",    "読売新聞／海外"),
+    ]
+    for query, name in queries:
+        try:
+            items.extend(
+                fetch_google_news(query, name, hl="ja", gl="JP", ceid="JP:ja")
+            )
+        except Exception:
+            pass
+    return dedupe(items)
+
+
+def fetch_sankei() -> List[Dict]:
+    """
+    産経新聞: 経済 / 政治 の2カテゴリを Google News 経由で取得。
+    """
+    items: List[Dict] = []
+    queries = [
+        ("site:sankei.com/economy",  "産経新聞／経済"),
+        ("site:sankei.com/politics", "産経新聞／政治"),
+    ]
+    for query, name in queries:
+        try:
+            items.extend(
+                fetch_google_news(query, name, hl="ja", gl="JP", ceid="JP:ja")
+            )
+        except Exception:
+            pass
+    return dedupe(items)
+
+
+# ============================================================
 # ★ 追加: TBS NEWS DIG（Bloomberg提携記事一覧）
 #   https://newsdig.tbs.co.jp/list/withbloomberg/news
 #
@@ -1844,6 +1887,10 @@ def fetch_all_sources(collector: BackgroundCollector) -> Dict[str, object]:
     # TBS NEWS DIG（Bloomberg提携記事一覧）
     tbs_bloomberg = fetch_tbs_newsdig_bloomberg()
 
+    # ★ 読売新聞（政治・経済・海外） / 産経新聞（経済・政治）
+    yomiuri = fetch_yomiuri()
+    sankei  = fetch_sankei()
+
     # first_seen を付与
     bloomberg_en      = collector.attach_first_seen(bloomberg_en)
     bloomberg_ja      = collector.attach_first_seen(bloomberg_ja)
@@ -1856,6 +1903,8 @@ def fetch_all_sources(collector: BackgroundCollector) -> Dict[str, object]:
     wsj_ja            = collector.attach_first_seen(wsj_ja)
     nikkei225jp_items = collector.attach_first_seen(nikkei225jp_items)
     tbs_bloomberg     = collector.attach_first_seen(tbs_bloomberg)
+    yomiuri           = collector.attach_first_seen(yomiuri)
+    sankei            = collector.attach_first_seen(sankei)
 
     # X ホームタイムライン
     x_home = fetch_x_home_timeline(max_results=100)
@@ -1885,14 +1934,15 @@ def fetch_all_sources(collector: BackgroundCollector) -> Dict[str, object]:
     all_8 = dedupe(all_8)
     all_8 = sort_items_by_effective_time_desc(all_8)
 
-    # All（全部まとめ）= 全ソース統合（★ X トレンド・SBI証券ファンドレポートも含む）
+    # All（全部まとめ）= 全ソース統合（★ X トレンド・SBI証券・読売・産経も含む）
     all_full = []
     for lst in [bloomberg_en, bloomberg_ja,
                 reuters_en, reuters_ja,
                 nikkei, nikkei_cookie,
                 nsj, wsj_en, wsj_ja, nikkei225jp_items,
                 x_home, x_4accounts, x_trends,
-                tbs_bloomberg, sbi_fund]:
+                tbs_bloomberg, sbi_fund,
+                yomiuri, sankei]:
         all_full.extend(lst)
     all_full = dedupe(all_full)
     all_full = sort_items_by_effective_time_desc(all_full)
@@ -1918,6 +1968,8 @@ def fetch_all_sources(collector: BackgroundCollector) -> Dict[str, object]:
         "x_trends":        sort_items_by_effective_time_desc(dedupe(x_trends)),
         "tbs_bloomberg":   sort_items_by_effective_time_desc(dedupe(tbs_bloomberg)),
         "sbi_fund":        sort_items_by_effective_time_desc(dedupe(sbi_fund)),
+        "yomiuri":         sort_items_by_effective_time_desc(dedupe(yomiuri)),
+        "sankei":          sort_items_by_effective_time_desc(dedupe(sankei)),
     }
 
 # -----------------------------
