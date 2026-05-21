@@ -1316,11 +1316,12 @@ def fetch_x_real_tweets() -> List[Dict]:
     since_str = time.strftime("%Y-%m-%d_%H:%M:%S_UTC", time.gmtime(since_ts))
 
     # アカウントごとの設定
+    # source は4アカウント全部「速報」に統一（ご要望どおり、Xアカウント名は出さない）
     account_configs = [
-        {"handle": "DeItaone",       "filter": "keywords", "source": "X @DeItaone (Walter Bloomberg)"},
-        {"handle": "FirstSquawk",    "filter": "keywords", "source": "X @FirstSquawk"},
-        {"handle": "financialjuice", "filter": "keywords", "source": "X @financialjuice"},
-        {"handle": "Yuto_Headline",  "filter": "asterisk", "source": "X @Yuto_Headline"},
+        {"handle": "DeItaone",       "filter": "keywords", "source": "速報"},
+        {"handle": "FirstSquawk",    "filter": "keywords", "source": "速報"},
+        {"handle": "financialjuice", "filter": "keywords", "source": "速報"},
+        {"handle": "Yuto_Headline",  "filter": "asterisk", "source": "速報"},
     ]
 
     items: List[Dict] = []
@@ -1365,7 +1366,16 @@ def fetch_x_real_tweets() -> List[Dict]:
 
             # ツイート本文の1行目をタイトルにする
             first_line = text.split("\n", 1)[0].strip()
-            title = first_line[:160] if first_line else text[:160]
+            raw_title = first_line[:160] if first_line else text[:160]
+
+            # タイトルに「🔴 速報 」を付けて、HTMLで赤字スタイルにする
+            # （render_items が HTML を直接埋め込む実装なので、ここでHTMLタグを入れてOK）
+            from html import escape as _html_escape
+            title = (
+                '<span style="color:#d32f2f; font-weight:bold;">'
+                '🔴 速報 ' + _html_escape(raw_title) +
+                '</span>'
+            )
 
             # ツイートURL
             tweet_url = t.get("url") or ""
