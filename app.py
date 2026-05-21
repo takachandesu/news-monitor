@@ -1220,6 +1220,181 @@ def fetch_x_4accounts() -> List[Dict]:
 
 
 # ============================================================
+# ★ 追加: X (Twitter) 本物のツイート取得（TwitterAPI.io 経由）
+#
+#  対象アカウント:
+#    - @DeItaone (Walter Bloomberg)  英語キーワードで絞り込み
+#    - @FirstSquawk                  英語キーワードで絞り込み
+#    - @financialjuice               英語キーワードで絞り込み
+#    - @Yuto_Headline                「*」で始まるツイートだけ
+#
+#  特徴:
+#    - 10分ごとのキャッシュ（過剰な API 呼び出しを防ぐ）
+#    - アカウント間 5 秒待機（レート制限 429 を回避）
+#    - 429 が出たら自動リトライ（最大2回、8秒・15秒の待機）
+#    - 翻訳しない（英語のまま表示）
+# ============================================================
+
+# 英語アカウント用キーワード（このどれかを含むツイートだけ拾う）
+X_REAL_KEYWORDS_EN = [
+    "Japan", "Japanese", "yen", "BOJ", "Tokyo", "Nikkei",
+    "Fed", "Trump", "tariff", "China", "rate", "dollar",
+    "oil", "intervention", "inflation",
+]
+
+# キャッシュ（プロセス内メモリ。10分間保持）
+_X_REAL_CACHE: Dict[str, object] = {
+    "items": [],
+    "fetched_at": 0,  # UNIX time
+}
+_X_REAL_CACHE_TTL = 600  # 秒（10分）
+
+
+def _twitterapi_io_search(query: str, api_key: str) -> List[Dict]:
+    """
+    TwitterAPI.io の advanced_search を叩く。
+    429 (Too Many Requests) が返ったら最大2回、待機を入れて再試行する。
+    """
+    url = (
+        "https://api.twitterapi.io/twitter/tweet/advanced_search"
+        "?query=" + requests.utils.quote(query) + "&queryType=Latest"
+    )
+    headers = {"X-API-Key": api_key}
+
+    max_attempts = 3
+    wait_seconds = [0, 8, 15]
+
+    for attempt in range(max_attempts):
+        if wait_seconds[attempt] > 0:
+            time.sleep(wait_seconds[attempt])
+
+        try:
+            r = requests.get(url, headers=headers, timeout=20)
+        except Exception:
+            return []
+
+        if 200 <= r.status_code < 300:
+            try:
+                data = r.json()
+            except Exception:
+                return []
+            tweets = data.get("tweets")
+            if isinstance(tweets, list):
+                return tweets
+            return []
+
+        # 429 ならリトライ、それ以外のエラーは即終了
+        if r.status_code == 429 and attempt < max_attempts - 1:
+            continue
+        return []
+
+    return []
+
+
+def fetch_x_real_tweets() -> List[Dict]:
+    """
+    TwitterAPI.io 経由で、4アカウントの本物のツイートを取得。
+    結果は10分間キャッシュする。
+    """
+    # キャッシュが新しければそれを返す
+    now = int(time.time())
+    if _X_REAL_CACHE["items"] and (now - _X_REAL_CACHE["fetched_at"] < _X_REAL_CACHE_TTL):
+        return list(_X_REAL_CACHE["items"])
+
+    # APIキーを Streamlit Secrets から取得
+    try:
+        api_key = st.secrets["twitterapi"]["api_key"]
+    except Exception:
+        # キーが未設定なら空で返す（アプリ全体は止めない）
+        return []
+
+    if not api_key or api_key == "ここに①TwitterAPI.ioのキー":
+        return []
+
+    # 直近 30 分のツイートを対象にする
+    since_ts = now - 30 * 60
+    since_str = time.strftime("%Y-%m-%d_%H:%M:%S_UTC", time.gmtime(since_ts))
+
+    # アカウントごとの設定
+    account_configs = [
+        {"handle": "DeItaone",       "filter": "keywords", "source": "X @DeItaone (Walter Bloomberg)"},
+        {"handle": "FirstSquawk",    "filter": "keywords", "source": "X @FirstSquawk"},
+        {"handle": "financialjuice", "filter": "keywords", "source": "X @financialjuice"},
+        {"handle": "Yuto_Headline",  "filter": "asterisk", "source": "X @Yuto_Headline"},
+    ]
+
+    items: List[Dict] = []
+
+    for i, acc in enumerate(account_configs):
+        # 2件目以降は前のアカウントから5秒待つ（レート制限回避）
+        if i > 0:
+            time.sleep(5)
+
+        query = "from:" + acc["handle"] + " since:" + since_str
+        tweets = _twitterapi_io_search(query, api_key)
+
+        for t in tweets:
+            text = t.get("text") or ""
+            if not text:
+                continue
+
+            # リプライ・リツイート除外
+            if t.get("isReply"):
+                continue
+            if text.startswith("RT @"):
+                continue
+            if t.get("retweeted_tweet"):
+                continue
+
+            # アカウント別の絞り込み
+            if acc["filter"] == "asterisk":
+                # 「*」で始まるツイートだけ通す
+                stripped = text.lstrip(" \t\r\n\"'＂　")
+                if not stripped.startswith("*"):
+                    continue
+            elif acc["filter"] == "keywords":
+                # キーワードを含むツイートだけ通す
+                hit = False
+                text_lower = text.lower()
+                for kw in X_REAL_KEYWORDS_EN:
+                    if kw.lower() in text_lower:
+                        hit = True
+                        break
+                if not hit:
+                    continue
+
+            # ツイート本文の1行目をタイトルにする
+            first_line = text.split("\n", 1)[0].strip()
+            title = first_line[:160] if first_line else text[:160]
+
+            # ツイートURL
+            tweet_url = t.get("url") or ""
+            if not tweet_url:
+                tid = t.get("id")
+                if tid:
+                    tweet_url = "https://x.com/" + acc["handle"] + "/status/" + str(tid)
+
+            if not tweet_url or not title:
+                continue
+
+            # 投稿時刻（あれば）
+            published = t.get("createdAt") or None
+
+            items.append({
+                "source": acc["source"],
+                "title": title,
+                "url": tweet_url,
+                "published": published,
+            })
+
+    # キャッシュ更新
+    _X_REAL_CACHE["items"] = items
+    _X_REAL_CACHE["fetched_at"] = now
+
+    return dedupe(items)
+
+
+# ============================================================
 # ★ 追加: X (Twitter) トレンド・カテゴリ別キーワード抽出
 #
 #  X 本体は API 認証が必要だが、Twitter のトレンドだけを集計する公開サイト
@@ -1912,6 +2087,11 @@ def fetch_all_sources(collector: BackgroundCollector) -> Dict[str, object]:
     x_4accounts = fetch_x_4accounts()
     x_4accounts = collector.attach_first_seen(x_4accounts)
 
+    # ★ X 本物ツイート（@DeItaone / @FirstSquawk / @financialjuice / @Yuto_Headline）
+    #    TwitterAPI.io 経由で取得、10分キャッシュ
+    x_real = fetch_x_real_tweets()
+    x_real = collector.attach_first_seen(x_real)
+
     # ★ X トレンド（カテゴリ別キーワード抽出: 米株/日本株/為替/政治/経済）
     x_trends = fetch_twitter_trends_categorized()
     x_trends = collector.attach_first_seen(x_trends)
@@ -1938,7 +2118,7 @@ def fetch_all_sources(collector: BackgroundCollector) -> Dict[str, object]:
                 reuters_en, reuters_ja,
                 nikkei, nikkei_cookie,
                 nsj, wsj_en, wsj_ja, nikkei225jp_items,
-                x_home, x_4accounts, x_trends,
+                x_home, x_4accounts, x_real, x_trends,
                 tbs_bloomberg, sbi_fund,
                 yomiuri, sankei]:
         all_full.extend(lst)
@@ -1963,6 +2143,7 @@ def fetch_all_sources(collector: BackgroundCollector) -> Dict[str, object]:
         "nsj_url":         nsj_url,
         "x_home":          sort_items(x_home),
         "x_4accounts":     sort_items_by_effective_time_desc(dedupe(x_4accounts)),
+        "x_real":          sort_items_by_effective_time_desc(dedupe(x_real)),
         "x_trends":        sort_items_by_effective_time_desc(dedupe(x_trends)),
         "tbs_bloomberg":   sort_items_by_effective_time_desc(dedupe(tbs_bloomberg)),
         "sbi_fund":        sort_items_by_effective_time_desc(dedupe(sbi_fund)),
