@@ -11,7 +11,7 @@ import json
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Tuple
 
 import requests
 import feedparser
@@ -1246,14 +1246,23 @@ X_REAL_KEYWORDS_EN = [
 _X_REAL_CACHE: Dict[str, object] = {
     "items": [],
     "fetched_at": 0,  # UNIX time
+    # ↓ 診断用：直近の取得状況を保存。サイドバーに表示する
+    "diag": {
+        "last_attempt_at": 0,  # 最後にAPI呼び出しを試みた時刻
+        "last_error": "",      # 直近のエラー（あれば）
+        "per_account": [],     # [{"handle":..., "raw":N, "passed":N, "status":...}, ...]
+        "secrets_ok": None,    # APIキーがSecretsから読めたか
+    },
 }
 _X_REAL_CACHE_TTL = 600  # 秒（10分）
 
 
-def _twitterapi_io_search(query: str, api_key: str) -> List[Dict]:
+def _twitterapi_io_search(query: str, api_key: str) -> Tuple[List[Dict], str]:
     """
     TwitterAPI.io の advanced_search を叩く。
     429 (Too Many Requests) が返ったら最大2回、待機を入れて再試行する。
+    戻り値: (tweets, status_text)
+      status_text は診断用。"ok"、"http:404"、"timeout"、"exception:..." など。
     """
     url = (
         "https://api.twitterapi.io/twitter/tweet/advanced_search"
@@ -1264,55 +1273,72 @@ def _twitterapi_io_search(query: str, api_key: str) -> List[Dict]:
     max_attempts = 3
     wait_seconds = [0, 8, 15]
 
+    last_status = "unknown"
+
     for attempt in range(max_attempts):
         if wait_seconds[attempt] > 0:
             time.sleep(wait_seconds[attempt])
 
         try:
             r = requests.get(url, headers=headers, timeout=20)
-        except Exception:
-            return []
+        except Exception as e:
+            last_status = "exception:" + type(e).__name__
+            return [], last_status
 
         if 200 <= r.status_code < 300:
             try:
                 data = r.json()
             except Exception:
-                return []
+                return [], "json_parse_error"
             tweets = data.get("tweets")
             if isinstance(tweets, list):
-                return tweets
-            return []
+                return tweets, "ok:" + str(len(tweets))
+            return [], "no_tweets_key"
 
+        last_status = "http:" + str(r.status_code)
         # 429 ならリトライ、それ以外のエラーは即終了
         if r.status_code == 429 and attempt < max_attempts - 1:
             continue
-        return []
+        return [], last_status
 
-    return []
+    return [], last_status
 
 
 def fetch_x_real_tweets() -> List[Dict]:
     """
     TwitterAPI.io 経由で、4アカウントの本物のツイートを取得。
     結果は10分間キャッシュする。
+    タイトルにはHTMLタグを入れない（描画側で is_breaking フラグを見て赤くする）。
     """
     # キャッシュが新しければそれを返す
     now = int(time.time())
     if _X_REAL_CACHE["items"] and (now - _X_REAL_CACHE["fetched_at"] < _X_REAL_CACHE_TTL):
         return list(_X_REAL_CACHE["items"])
 
+    # 診断情報を初期化
+    diag = _X_REAL_CACHE["diag"]
+    diag["last_attempt_at"] = now
+    diag["last_error"] = ""
+    diag["per_account"] = []
+    diag["secrets_ok"] = None
+
     # APIキーを Streamlit Secrets から取得
     try:
         api_key = st.secrets["twitterapi"]["api_key"]
-    except Exception:
+        diag["secrets_ok"] = True
+    except Exception as e:
         # キーが未設定なら空で返す（アプリ全体は止めない）
+        diag["secrets_ok"] = False
+        diag["last_error"] = "Secrets読み込み失敗: " + type(e).__name__
         return []
 
     if not api_key or api_key == "ここに①TwitterAPI.ioのキー":
+        diag["secrets_ok"] = False
+        diag["last_error"] = "APIキーが空またはプレースホルダーのまま"
         return []
 
-    # 直近 30 分のツイートを対象にする
-    since_ts = now - 30 * 60
+    # 直近 60 分のツイートを対象にする（30分だと取りこぼしが多いので拡張）
+    since_ts = now - 60 * 60
     since_str = time.strftime("%Y-%m-%d_%H:%M:%S_UTC", time.gmtime(since_ts))
 
     # アカウントごとの設定
@@ -1332,7 +1358,10 @@ def fetch_x_real_tweets() -> List[Dict]:
             time.sleep(5)
 
         query = "from:" + acc["handle"] + " since:" + since_str
-        tweets = _twitterapi_io_search(query, api_key)
+        tweets, status = _twitterapi_io_search(query, api_key)
+
+        raw_count = len(tweets) if tweets else 0
+        passed_count = 0
 
         for t in tweets:
             text = t.get("text") or ""
@@ -1349,9 +1378,9 @@ def fetch_x_real_tweets() -> List[Dict]:
 
             # アカウント別の絞り込み
             if acc["filter"] == "asterisk":
-                # 「*」で始まるツイートだけ通す
+                # 「*」または「＊」(全角)で始まるツイートだけ通す
                 stripped = text.lstrip(" \t\r\n\"'＂　")
-                if not stripped.startswith("*"):
+                if not (stripped.startswith("*") or stripped.startswith("＊")):
                     continue
             elif acc["filter"] == "keywords":
                 # キーワードを含むツイートだけ通す
@@ -1368,14 +1397,10 @@ def fetch_x_real_tweets() -> List[Dict]:
             first_line = text.split("\n", 1)[0].strip()
             raw_title = first_line[:160] if first_line else text[:160]
 
-            # タイトルに「🔴 速報 」を付けて、HTMLで赤字スタイルにする
-            # （render_items が HTML を直接埋め込む実装なので、ここでHTMLタグを入れてOK）
-            from html import escape as _html_escape
-            title = (
-                '<span style="color:#d32f2f; font-weight:bold;">'
-                '🔴 速報 ' + _html_escape(raw_title) +
-                '</span>'
-            )
+            # ★ タイトルにHTMLタグは入れない（描画側で is_breaking を見て赤くする）
+            #    プレーンテキストの「🔴速報 」プレフィックスだけ付けておくと、
+            #    万一描画側のフラグ判定が外れても見た目で速報と分かる。
+            title = "🔴速報 " + raw_title
 
             # ツイートURL
             tweet_url = t.get("url") or ""
@@ -1387,7 +1412,7 @@ def fetch_x_real_tweets() -> List[Dict]:
             if not tweet_url or not title:
                 continue
 
-            # 投稿時刻（あれば）
+            # 投稿時刻（あれば文字列のまま入れる。描画側は first_seen を使う）
             published = t.get("createdAt") or None
 
             items.append({
@@ -1395,7 +1420,17 @@ def fetch_x_real_tweets() -> List[Dict]:
                 "title": title,
                 "url": tweet_url,
                 "published": published,
+                "is_breaking": True,  # ← 描画側でこれを見て赤色スタイルを当てる
             })
+            passed_count += 1
+
+        # アカウント単位の診断情報を記録
+        diag["per_account"].append({
+            "handle": acc["handle"],
+            "status": status,
+            "raw": raw_count,
+            "passed": passed_count,
+        })
 
     # キャッシュ更新
     _X_REAL_CACHE["items"] = items
@@ -1793,7 +1828,13 @@ def render_items(items: List[Dict], limit: int, show_source: bool, show_time: bo
         return
 
     # --- 全行を HTML 文字列に組み立て ---
-    rows_html = ""
+    # ★ 速報用の赤色スタイル（is_breaking=True の行にだけ適用）
+    from html import escape as _html_escape_local
+    rows_html = """
+    <style>
+    .news-title.is-breaking { color: #d32f2f; font-weight: bold; }
+    </style>
+    """
     shown = 0
     for it in items:
         if shown >= limit:
@@ -1802,6 +1843,7 @@ def render_items(items: List[Dict], limit: int, show_source: bool, show_time: bo
         title = (it.get("title") or "").strip()
         url = (it.get("url") or "").strip()
         src = (it.get("source") or "").strip()
+        is_breaking = bool(it.get("is_breaking"))
 
         dt = it.get("published")
         if not isinstance(dt, datetime):
@@ -1814,12 +1856,16 @@ def render_items(items: List[Dict], limit: int, show_source: bool, show_time: bo
             meta_bits.append(src)
         meta = " / ".join(meta_bits)
 
+        # ★ タイトルはエスケープ（HTMLタグが含まれていてもプレーンに表示）
+        title_html = _html_escape_local(title)
+        title_class = "news-title is-breaking" if is_breaking else "news-title"
+
         rows_html += f"""
         <div class="news-row" style="border-bottom:1px solid rgba(128,128,128,0.15); padding:4px 0;">
           <div class="news-open"><a href="{url}" target="_blank" rel="noopener noreferrer">Open</a></div>
-          <div class="news-title">
-            {title}
-            {"<span class='news-meta'>(" + meta + ")</span>" if meta else ""}
+          <div class="{title_class}">
+            {title_html}
+            {"<span class='news-meta'>(" + _html_escape_local(meta) + ")</span>" if meta else ""}
           </div>
         </div>
         """
@@ -1841,6 +1887,7 @@ def render_items(items: List[Dict], limit: int, show_source: bool, show_time: bo
             title = (it.get("title") or "").strip()
             url   = (it.get("url")   or "").strip()
             src   = (it.get("source") or "").strip()
+            is_breaking = bool(it.get("is_breaking"))
             dt    = it.get("published")
             if not isinstance(dt, datetime):
                 dt = it.get("first_seen")
@@ -1852,7 +1899,10 @@ def render_items(items: List[Dict], limit: int, show_source: bool, show_time: bo
                 meta_parts.append(src)
             meta = " / ".join(meta_parts)
             key  = (url or title).strip()
-            items_data.append({"key": key, "title": title, "url": url, "meta": meta})
+            items_data.append({
+                "key": key, "title": title, "url": url, "meta": meta,
+                "is_breaking": is_breaking,
+            })
             shown += 1
 
         items_json = _json.dumps(items_data, ensure_ascii=False)
@@ -1927,6 +1977,11 @@ def render_items(items: List[Dict], limit: int, show_source: bool, show_time: bo
             font-size: {title_px}px;
             line-height: 1.15;
             color: var(--fg);
+        }}
+        /* ★ 速報用：赤太字 */
+        .ntitle.is-breaking {{
+            color: #d32f2f;
+            font-weight: bold;
         }}
         .nrow.is-new {{
             animation: flowDown 5s ease-out forwards;
@@ -2006,9 +2061,11 @@ def render_items(items: List[Dict], limit: int, show_source: bool, show_time: bo
             function makeRow(it, isNew) {{
                 const row = document.createElement('div');
                 row.className = 'nrow' + (isNew ? ' is-new' : '');
+                // ★ is_breaking のときは ntitle に is-breaking クラスを足す → 赤太字
+                const titleClass = it.is_breaking ? 'ntitle is-breaking' : 'ntitle';
                 row.innerHTML =
                     '<div class="nbtn"><a href="' + esc(it.url) + '" target="_blank" rel="noopener noreferrer">Open</a></div>' +
-                    '<div class="ntitle">' + esc(it.title) +
+                    '<div class="' + titleClass + '">' + esc(it.title) +
                     (it.meta ? '<span class="nmeta"> (' + esc(it.meta) + ')</span>' : '') +
                     '</div>';
                 return row;
@@ -2255,6 +2312,44 @@ else:
 
 st.sidebar.caption(f"収集更新（サーバー側）：{running_interval} 秒ごと")
 st.sidebar.caption(f"最終収集時刻：{last_updated if last_updated else '（収集中…）'}")
+
+# -----------------------------
+# ★ 速報X取得の診断パネル（折りたたみ式）
+# -----------------------------
+with st.sidebar.expander("🔴 速報X取得の状況（診断）", expanded=False):
+    _diag = _X_REAL_CACHE.get("diag", {}) or {}
+    _ok = _diag.get("secrets_ok")
+    if _ok is True:
+        st.success("✅ APIキー：Secretsから読込済み")
+    elif _ok is False:
+        st.error("❌ APIキー：読込失敗 / 空")
+    else:
+        st.info("⏳ APIキー：まだ取得を試みていません")
+
+    if _diag.get("last_error"):
+        st.error("直近エラー: " + str(_diag["last_error"]))
+
+    _last_attempt = _diag.get("last_attempt_at", 0)
+    if _last_attempt:
+        _ago = max(0, int(time.time()) - int(_last_attempt))
+        st.caption(f"最終API試行: {_ago}秒前")
+    else:
+        st.caption("最終API試行: まだなし")
+
+    _cached_n = len(_X_REAL_CACHE.get("items", []) or [])
+    st.caption(f"キャッシュ内のツイート件数: {_cached_n}件")
+
+    _per = _diag.get("per_account", []) or []
+    if _per:
+        st.caption("アカウント別（直近の取得結果）:")
+        for row in _per:
+            st.caption(
+                f"  • @{row.get('handle')}: "
+                f"生{row.get('raw',0)}件 → 通過{row.get('passed',0)}件 "
+                f"[{row.get('status','?')}]"
+            )
+    else:
+        st.caption("アカウント別データなし（まだ未取得）")
 
 if not data_snapshot:
     st.info("初回の取得中です。数秒待ってから自動的に更新されます。")
