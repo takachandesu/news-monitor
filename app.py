@@ -9,7 +9,7 @@ import re
 import time
 import json
 import threading
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import List, Dict, Optional, Tuple
 
@@ -1262,7 +1262,158 @@ def _get_x_real_cache() -> Dict[str, object]:
     }
 
 _X_REAL_CACHE: Dict[str, object] = _get_x_real_cache()
-_X_REAL_CACHE_TTL = 600  # 秒（10分）
+
+# ★ 取得スケジュール: 毎時 :01, :16, :31, :46 に取得（指標発表 :00/:30 の1分後）
+#   各スロットの中では1回だけ取得し、次のスロットが始まるまでキャッシュを返す。
+_X_REAL_SLOT_MARKS = [1, 16, 31, 46]  # 分（0-59）
+
+
+def _get_current_slot_start(now_epoch: int) -> int:
+    """
+    現在時刻が属するスロットの開始 epoch を返す。
+    例: 12:23 → 12:16 のepoch / 12:31:05 → 12:31 のepoch / 12:00:30 → 11:46 のepoch
+    """
+    hour_start = now_epoch - (now_epoch % 3600)
+    minute_in_hour = (now_epoch - hour_start) // 60
+
+    # 現在の分以下で最大のスロット境界を探す
+    current_slot_mark = None
+    for m in _X_REAL_SLOT_MARKS:
+        if m <= minute_in_hour:
+            current_slot_mark = m
+        else:
+            break
+
+    if current_slot_mark is None:
+        # 0分台の時は前の時間の :46 スロットが最新
+        return hour_start - 3600 + 46 * 60
+    return hour_start + current_slot_mark * 60
+
+
+def _get_next_slot_start(now_epoch: int) -> int:
+    """
+    次のスロットの開始 epoch を返す（診断パネルで「次回取得予定」を表示するため）。
+    """
+    hour_start = now_epoch - (now_epoch % 3600)
+    minute_in_hour = (now_epoch - hour_start) // 60
+
+    # 現在の分より大きい最小のスロット境界を探す
+    for m in _X_REAL_SLOT_MARKS:
+        if m > minute_in_hour:
+            return hour_start + m * 60
+    # 全部過ぎていたら次の時間の :01
+    return hour_start + 3600 + _X_REAL_SLOT_MARKS[0] * 60
+
+
+# ============================================================
+# ★ 翻訳機能（Claude Haiku 4.5）
+#
+#  FirstSquawk の英語ツイートを日本語に翻訳する。
+#  - 同じ英文は1回しか翻訳しない（翻訳キャッシュで節約）
+#  - キーが無い・API失敗の場合は英文のまま返す（アプリは止めない）
+#  - タイトル1行目だけ翻訳（コスト最小化）
+# ============================================================
+@st.cache_resource
+def _get_translation_cache() -> Dict[str, object]:
+    """
+    英文 → 日本語訳 のキャッシュ。プロセス生存中は保持。
+    diag は翻訳の診断情報（試行回数・成功数・失敗数・直近エラー）。
+    """
+    return {
+        "map": {},  # {english_text: japanese_text}
+        "diag": {
+            "attempts": 0,
+            "successes": 0,
+            "failures": 0,
+            "last_error": "",
+            "secrets_ok": None,
+        },
+    }
+
+
+def _translate_to_japanese(english_text: str) -> str:
+    """
+    英文を日本語に翻訳して返す。
+    - 空文字や日本語が混じってる場合などは元の文を返す
+    - 数値・記号だけのテキスト（例: "156.23", "+0.5%"）は翻訳しない（Claude APIコスト節約）
+    - Claude API キーが無ければ元の文を返す
+    - 翻訳に失敗したら元の文を返す（アプリは止めない）
+    - キャッシュにあれば即返す
+    """
+    if not english_text or not english_text.strip():
+        return english_text
+
+    # ★ 数値・記号だけのテキストは翻訳しない
+    #   アルファベット3文字以上が含まれていなければ「翻訳する意味なし」と判断
+    #   例:
+    #     "156.23"        → アルファベット0文字 → 翻訳しない
+    #     "+0.5%"         → アルファベット0文字 → 翻訳しない
+    #     "JPY: 156.45"   → アルファベット3文字 → 翻訳する
+    #     "JAPAN Q1 GDP"  → アルファベット多数 → 翻訳する
+    letter_count = sum(1 for c in english_text if c.isalpha())
+    if letter_count < 3:
+        return english_text
+
+    tc = _get_translation_cache()
+    tmap = tc["map"]
+    tdiag = tc["diag"]
+
+    cache_key = english_text.strip()
+    if cache_key in tmap:
+        return tmap[cache_key]
+
+    # Claude API キーを Secrets から取得
+    try:
+        api_key = st.secrets["claude"]["api_key"]
+        tdiag["secrets_ok"] = True
+    except Exception as e:
+        tdiag["secrets_ok"] = False
+        tdiag["last_error"] = "Secrets読み込み失敗: " + type(e).__name__
+        return english_text  # 鍵が無いので元の英文を返す
+
+    if not api_key:
+        tdiag["secrets_ok"] = False
+        tdiag["last_error"] = "APIキーが空"
+        return english_text
+
+    # Anthropic ライブラリで翻訳
+    tdiag["attempts"] += 1
+    try:
+        import anthropic
+        client = anthropic.Anthropic(api_key=api_key)
+        message = client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=300,
+            messages=[
+                {
+                    "role": "user",
+                    "content": (
+                        "次の英語の金融速報ヘッドラインを、自然な日本語に翻訳してください。"
+                        "翻訳結果のみを出力し、説明や前置きは一切付けないでください。"
+                        "ニュース速報らしい簡潔な表現でお願いします。\n\n"
+                        + english_text
+                    ),
+                }
+            ],
+        )
+        # message.content は list of content blocks
+        translated = ""
+        if message.content and len(message.content) > 0:
+            translated = (message.content[0].text or "").strip()
+
+        if not translated:
+            tdiag["failures"] += 1
+            tdiag["last_error"] = "翻訳結果が空"
+            return english_text
+
+        tmap[cache_key] = translated
+        tdiag["successes"] += 1
+        return translated
+
+    except Exception as e:
+        tdiag["failures"] += 1
+        tdiag["last_error"] = type(e).__name__ + ": " + str(e)[:120]
+        return english_text  # 失敗時は元の英文を返す
 
 
 def _twitterapi_io_search(query: str, api_key: str) -> Tuple[List[Dict], str]:
@@ -1327,10 +1478,15 @@ def fetch_x_real_tweets() -> List[Dict]:
     cache = _get_x_real_cache()
     print(f"[fetch_x_real_tweets] cache id={id(cache)}", file=_sys.stderr, flush=True)
 
-    # キャッシュが新しければそれを返す
+    # ★ スロット方式キャッシュ判定:
+    #   毎時 :01, :16, :31, :46 を境に新しい「取得スロット」が始まる。
+    #   このスロットの中で既に取得済み（fetched_at >= slot_start）ならキャッシュを返す。
+    #   こうすることで、指標発表 :00/:30 の直後 (:01/:31) に確実に取得され、
+    #   かつ各スロット内で重複取得は起きない。
     now = int(time.time())
-    if cache["items"] and (now - cache["fetched_at"] < _X_REAL_CACHE_TTL):
-        print(f"[fetch_x_real_tweets] returning {len(cache['items'])} cached items", file=_sys.stderr, flush=True)
+    slot_start = _get_current_slot_start(now)
+    if cache["fetched_at"] >= slot_start:
+        print(f"[fetch_x_real_tweets] within current slot (fetched_at={cache['fetched_at']}, slot_start={slot_start}), returning {len(cache['items'])} cached items", file=_sys.stderr, flush=True)
         return list(cache["items"])
 
     # 診断情報を初期化
@@ -1361,12 +1517,12 @@ def fetch_x_real_tweets() -> List[Dict]:
     since_str = time.strftime("%Y-%m-%d_%H:%M:%S_UTC", time.gmtime(since_ts))
 
     # アカウントごとの設定
-    # source は4アカウント全部「速報」に統一（ご要望どおり、Xアカウント名は出さない）
+    # source は2アカウント両方「速報」に統一（Xアカウント名は出さない）
+    # FirstSquawk: filter="none" → 全ツイート通過（英語のままだと読めないので、後で翻訳される）
+    # Yuto_Headline: filter="asterisk" → 「*」または「＊」で始まるツイートのみ通過（日本語なので翻訳不要）
     account_configs = [
-        {"handle": "DeItaone",       "filter": "keywords", "source": "速報"},
-        {"handle": "FirstSquawk",    "filter": "keywords", "source": "速報"},
-        {"handle": "financialjuice", "filter": "keywords", "source": "速報"},
-        {"handle": "Yuto_Headline",  "filter": "asterisk", "source": "速報"},
+        {"handle": "FirstSquawk",    "filter": "none",     "source": "速報", "translate": True},
+        {"handle": "Yuto_Headline",  "filter": "asterisk", "source": "速報", "translate": False},
     ]
 
     items: List[Dict] = []
@@ -1411,15 +1567,24 @@ def fetch_x_real_tweets() -> List[Dict]:
                         break
                 if not hit:
                     continue
+            elif acc["filter"] == "none":
+                # 全部通過（フィルターなし）
+                pass
 
             # ツイート本文の1行目をタイトルにする
             first_line = text.split("\n", 1)[0].strip()
             raw_title = first_line[:160] if first_line else text[:160]
 
+            # ★ 翻訳が必要なアカウント（FirstSquawk等）は raw_title を日本語に翻訳
+            if acc.get("translate"):
+                display_title = _translate_to_japanese(raw_title)
+            else:
+                display_title = raw_title
+
             # ★ タイトルにHTMLタグは入れない（描画側で is_breaking を見て赤くする）
             #    プレーンテキストの「🔴速報 」プレフィックスだけ付けておくと、
             #    万一描画側のフラグ判定が外れても見た目で速報と分かる。
-            title = "🔴速報 " + raw_title
+            title = "🔴速報 " + display_title
 
             # ツイートURL
             tweet_url = t.get("url") or ""
@@ -2381,6 +2546,16 @@ with st.sidebar.expander("🔴 速報X取得の状況（診断）", expanded=Fal
     else:
         st.caption("最終API試行: まだなし")
 
+    # ★ 次回取得予定の時刻を表示（毎時 :01, :16, :31, :46）
+    _now_epoch = int(time.time())
+    _next_slot = _get_next_slot_start(_now_epoch)
+    _wait_seconds = max(0, _next_slot - _now_epoch)
+    _wait_min = _wait_seconds // 60
+    _wait_sec = _wait_seconds % 60
+    # JST (UTC+9) で表示
+    _next_jst = datetime.fromtimestamp(_next_slot, tz=timezone.utc).astimezone(timezone(timedelta(hours=9)))
+    st.caption(f"次回取得予定: {_next_jst.strftime('%H:%M')} JST（あと{_wait_min}分{_wait_sec}秒）")
+
     _cached_n = len(_cache_now.get("items", []) or [])
     st.caption(f"キャッシュ内のツイート件数: {_cached_n}件")
 
@@ -2395,6 +2570,30 @@ with st.sidebar.expander("🔴 速報X取得の状況（診断）", expanded=Fal
             )
     else:
         st.caption("アカウント別データなし（まだ未取得）")
+
+    # ── 翻訳（Claude Haiku 4.5）の診断情報 ──
+    st.markdown("---")
+    st.caption("**翻訳（Claude Haiku 4.5）**")
+    _tc = _get_translation_cache()
+    _tdiag = _tc.get("diag", {}) or {}
+    _tok = _tdiag.get("secrets_ok")
+    if _tok is True:
+        st.success("✅ Claude APIキー：Secretsから読込済み")
+    elif _tok is False:
+        st.error("❌ Claude APIキー：未設定 / 読込失敗（英文のまま表示されます）")
+    else:
+        st.info("⏳ Claude APIキー：まだ翻訳呼び出しが行われていません")
+
+    if _tdiag.get("last_error"):
+        st.error("翻訳の直近エラー: " + str(_tdiag["last_error"]))
+
+    st.caption(
+        f"翻訳: 試行{_tdiag.get('attempts',0)}回 / "
+        f"成功{_tdiag.get('successes',0)}回 / "
+        f"失敗{_tdiag.get('failures',0)}回"
+    )
+    _tmap_n = len(_tc.get("map", {}) or {})
+    st.caption(f"翻訳キャッシュ: {_tmap_n}件保持中（同じ英文は2回目以降タダ）")
 
 if not data_snapshot:
     st.info("初回の取得中です。数秒待ってから自動的に更新されます。")
