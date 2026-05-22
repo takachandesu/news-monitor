@@ -1318,14 +1318,19 @@ def fetch_x_real_tweets() -> List[Dict]:
     結果は10分間キャッシュする。
     タイトルにはHTMLタグを入れない（描画側で is_breaking フラグを見て赤くする）。
     """
+    import sys as _sys
+    print("[fetch_x_real_tweets] called", file=_sys.stderr, flush=True)
+
     # ★ シングルトン辞書をローカル変数に取り出して、関数内で確実に同じ辞書を読み書きする。
     #   （module level の _X_REAL_CACHE は Streamlit の再実行で別オブジェクトに
     #     なる可能性があるため、ここで明示的に singleton getter を呼ぶ）
     cache = _get_x_real_cache()
+    print(f"[fetch_x_real_tweets] cache id={id(cache)}", file=_sys.stderr, flush=True)
 
     # キャッシュが新しければそれを返す
     now = int(time.time())
     if cache["items"] and (now - cache["fetched_at"] < _X_REAL_CACHE_TTL):
+        print(f"[fetch_x_real_tweets] returning {len(cache['items'])} cached items", file=_sys.stderr, flush=True)
         return list(cache["items"])
 
     # 診断情報を初期化
@@ -1334,6 +1339,7 @@ def fetch_x_real_tweets() -> List[Dict]:
     diag["last_error"] = ""
     diag["per_account"] = []
     diag["secrets_ok"] = None
+    print(f"[fetch_x_real_tweets] diag initialized, last_attempt_at={now}", file=_sys.stderr, flush=True)
 
     # APIキーを Streamlit Secrets から取得
     try:
@@ -2159,21 +2165,42 @@ def fetch_all_sources(collector: BackgroundCollector) -> Dict[str, object]:
     yomiuri           = collector.attach_first_seen(yomiuri)
     sankei            = collector.attach_first_seen(sankei)
 
+    # ── X 関連の取得（互いに巻き込まれないよう、それぞれ個別に try/except で防護） ──
+    import sys as _sys
+
     # X ホームタイムライン
-    x_home = fetch_x_home_timeline(max_results=100)
+    try:
+        x_home = fetch_x_home_timeline(max_results=100)
+    except Exception as _e:
+        print(f"[x_home] EXCEPTION: {type(_e).__name__}: {_e}", file=_sys.stderr, flush=True)
+        x_home = []
     x_home = collector.attach_first_seen(x_home)
 
     # X 4アカウント（@BloombergJapan / @business / @ReutersJapan / @Reuters）
-    x_4accounts = fetch_x_4accounts()
+    try:
+        x_4accounts = fetch_x_4accounts()
+    except Exception as _e:
+        print(f"[x_4accounts] EXCEPTION: {type(_e).__name__}: {_e}", file=_sys.stderr, flush=True)
+        x_4accounts = []
     x_4accounts = collector.attach_first_seen(x_4accounts)
 
     # ★ X 本物ツイート（@DeItaone / @FirstSquawk / @financialjuice / @Yuto_Headline）
     #    TwitterAPI.io 経由で取得、10分キャッシュ
-    x_real = fetch_x_real_tweets()
+    print("[x_real] about to call fetch_x_real_tweets()", file=_sys.stderr, flush=True)
+    try:
+        x_real = fetch_x_real_tweets()
+        print(f"[x_real] returned {len(x_real)} items", file=_sys.stderr, flush=True)
+    except Exception as _e:
+        print(f"[x_real] EXCEPTION: {type(_e).__name__}: {_e}", file=_sys.stderr, flush=True)
+        x_real = []
     x_real = collector.attach_first_seen(x_real)
 
     # ★ X トレンド（カテゴリ別キーワード抽出: 米株/日本株/為替/政治/経済）
-    x_trends = fetch_twitter_trends_categorized()
+    try:
+        x_trends = fetch_twitter_trends_categorized()
+    except Exception as _e:
+        print(f"[x_trends] EXCEPTION: {type(_e).__name__}: {_e}", file=_sys.stderr, flush=True)
+        x_trends = []
     x_trends = collector.attach_first_seen(x_trends)
 
     # ★ SBI証券 ファンドレポート
@@ -2334,6 +2361,7 @@ with st.sidebar.expander("🔴 速報X取得の状況（診断）", expanded=Fal
     #   再実行で別オブジェクトになりうるので、毎回 _get_x_real_cache() を呼んで
     #   バックグラウンドスレッドと同じ辞書を確実に読む）
     _cache_now = _get_x_real_cache()
+    st.caption(f"🔬 cache dict id (デバッグ): {id(_cache_now)}")  # 書き手と一致してるか確認用
     _diag = _cache_now.get("diag", {}) or {}
     _ok = _diag.get("secrets_ok")
     if _ok is True:
