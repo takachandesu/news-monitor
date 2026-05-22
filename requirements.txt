@@ -3,3 +3,4 @@ requests
 feedparser
 beautifulsoup4
 tweepy
+anthropic
