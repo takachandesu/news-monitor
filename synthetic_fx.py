@@ -604,13 +604,14 @@ def render_synthetic_fx(data: Dict[str, Any]) -> None:
 
     # ================================================
     # 2段目: 土日カード (is_weekendがTrueの時のみ表示・失敗時は理由表示)
+    # 並び順: ① ダウ → ② NASDAQ100 → ③ ドル円(合成) → ④ VIX
     # ================================================
     weekend_row = ""
     if is_we:
         prev_closes = data.get("prev_closes") or {}
 
         def _chg_html(current_val: float, prev_close: Optional[float]) -> str:
-            """金曜終値からの変化金額と変化率をHTMLで返す"""
+            """金曜終値からの変化金額と変化率をHTMLで返す。出所表記は付けない。"""
             if not prev_close or prev_close <= 0 or not current_val:
                 return ''
             chg = current_val - prev_close
@@ -621,57 +622,75 @@ def render_synthetic_fx(data: Dict[str, Any]) -> None:
                 f'<div class="syn-chg" style="color:{color};">'
                 f'{sign}{chg:,.2f} ({sign}{pct:.2f}%)'
                 f'</div>'
-                f'<div class="syn-sub2">金曜終値 {prev_close:,.2f} 基準</div>'
             )
 
-        # 合成USDJPY
+        # ── ① 土日ダウ
+        if sekai and "dow" in sekai:
+            lo = sekai["dow"]["low"]
+            hi = sekai["dow"]["high"]
+            mid = (lo + hi) / 2
+            chg_html = _chg_html(mid, prev_closes.get("dow"))
+            weekend_row += (
+                f'<div class="syn-card syn-weekend">'
+                f'<div class="syn-label">🇺🇸 土日ダウ</div>'
+                f'<div class="syn-value">{mid:,.2f}</div>'
+                f'{chg_html}'
+                f'</div>'
+            )
+
+        # ── ② 土日NASDAQ100
+        if sekai and "nas100" in sekai:
+            lo = sekai["nas100"]["low"]
+            hi = sekai["nas100"]["high"]
+            mid = (lo + hi) / 2
+            chg_html = _chg_html(mid, prev_closes.get("nas100"))
+            weekend_row += (
+                f'<div class="syn-card syn-weekend">'
+                f'<div class="syn-label">🇺🇸 土日NASDAQ100</div>'
+                f'<div class="syn-value">{mid:,.2f}</div>'
+                f'{chg_html}'
+                f'</div>'
+            )
+
+        # ── ③ 土日ドル円
         if synth and synth.get("value"):
             v = synth["value"]
             chg_html = _chg_html(v, prev_closes.get("usdjpy"))
             weekend_row += (
                 f'<div class="syn-card syn-weekend">'
-                f'<div class="syn-label">🟡 合成USD/JPY (土日)</div>'
+                f'<div class="syn-label">💴 土日ドル円</div>'
                 f'<div class="syn-value">{v:,.3f}</div>'
                 f'{chg_html}'
-                f'<div class="syn-sub">bitFlyer BTC/JPY ÷ Binance BTC/USDT</div>'
                 f'</div>'
             )
         elif synth and synth.get("error"):
             weekend_row += (
                 f'<div class="syn-card syn-weekend syn-dim">'
-                f'<div class="syn-label">🟡 合成USD/JPY (土日)</div>'
+                f'<div class="syn-label">💴 土日ドル円</div>'
                 f'<div class="syn-value">--</div>'
-                f'<div class="syn-sub">取得失敗: {synth.get("error","")}</div>'
                 f'</div>'
             )
 
-        # sekai-kabuka 由来 (ダウ/NAS/VIX)
-        labels = {
-            "dow":    ("🇺🇸 ダウ 24h CFD (土日)", ""),
-            "nas100": ("🇺🇸 NASDAQ100 24h (土日)", ""),
-            "vix":    ("😱 VIX (土日参考値)", ""),
-        }
-        if sekai:
-            for key, (lbl, unit) in labels.items():
-                if key in sekai:
-                    lo = sekai[key]["low"]
-                    hi = sekai[key]["high"]
-                    mid = (lo + hi) / 2
-                    chg_html = _chg_html(mid, prev_closes.get(key))
-                    weekend_row += (
-                        f'<div class="syn-card syn-weekend">'
-                        f'<div class="syn-label">{lbl}</div>'
-                        f'<div class="syn-value">{mid:,.2f}{unit}</div>'
-                        f'{chg_html}'
-                        f'<div class="syn-sub">本日レンジ {lo:,.2f} 〜 {hi:,.2f}</div>'
-                        f'</div>'
-                    )
-        if not sekai and sekai_error:
+        # ── ④ 土日VIX
+        if sekai and "vix" in sekai:
+            lo = sekai["vix"]["low"]
+            hi = sekai["vix"]["high"]
+            mid = (lo + hi) / 2
+            chg_html = _chg_html(mid, prev_closes.get("vix"))
+            weekend_row += (
+                f'<div class="syn-card syn-weekend">'
+                f'<div class="syn-label">😱 土日VIX</div>'
+                f'<div class="syn-value">{mid:,.2f}</div>'
+                f'{chg_html}'
+                f'</div>'
+            )
+
+        # sekai 全滅時のエラーカード (出所文言なし)
+        if (not sekai) and sekai_error:
             weekend_row += (
                 f'<div class="syn-card syn-weekend syn-dim">'
-                f'<div class="syn-label">🌐 sekai-kabuka (ダウ/NAS/VIX)</div>'
+                f'<div class="syn-label">🌐 株価指数</div>'
                 f'<div class="syn-value">--</div>'
-                f'<div class="syn-sub">取得失敗: {sekai_error}</div>'
                 f'</div>'
             )
 
@@ -691,6 +710,7 @@ def render_synthetic_fx(data: Dict[str, Any]) -> None:
     weekend_html = (
         f'<div class="syn-wrap syn-weekend-wrap">'
         f'<div class="syn-weekend-title">📅 土日モード ({now_jst})</div>'
+        f'<div class="syn-weekend-subtitle">土日に動く為替と株価指数です。参考値です。</div>'
         f'<div class="syn-wrap" style="margin:0;">{weekend_row}</div>'
         f'</div>'
     ) if weekend_row else ""
@@ -761,18 +781,4 @@ def render_synthetic_fx(data: Dict[str, Any]) -> None:
   margin: 8px 0;
   background: rgba(76, 175, 80, 0.03);
 }
-.syn-weekend-title{
-  font-size: 13px;
-  font-weight: 800;
-  color: #0a3d1f;
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI",
-    "Hiragino Kaku Gothic ProN", "Yu Gothic UI", "Meiryo", sans-serif;
-  letter-spacing: 0.2px;
-  margin-bottom: 4px;
-}
-</style>
-__WEEKEND__
-<div class="syn-wrap">__RECALC__</div>
-""".replace("__RECALC__", recalc_row).replace("__WEEKEND__", weekend_html)
-
-    st.markdown(html, unsafe_allow_html=True)
+.syn-weekend-ti
