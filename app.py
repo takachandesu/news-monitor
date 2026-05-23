@@ -2422,6 +2422,37 @@ def fetch_all_sources(collector: BackgroundCollector) -> Dict[str, object]:
     all_full = dedupe(all_full)
     all_full = sort_items_by_effective_time_desc(all_full)
 
+    # ★ Yahoo! 由来の記事をすべてのソースから二重に除外（ユーザー指定）
+    # source か URL に "yahoo" "ヤフー" を含む場合スキップ。
+    def _drop_yahoo(items: List[Dict]) -> List[Dict]:
+        out = []
+        for it in items or []:
+            try:
+                src = (it.get("source") or "").lower()
+                url = (it.get("url") or "").lower()
+                if "yahoo" in src or "ヤフー" in (it.get("source") or "") or "yahoo.co.jp" in url or "yahoo.com" in url:
+                    continue
+            except Exception:
+                pass
+            out.append(it)
+        return out
+
+    all_full          = _drop_yahoo(all_full)
+    nikkei225jp_items = _drop_yahoo(nikkei225jp_items)
+    bloomberg_en      = _drop_yahoo(bloomberg_en)
+    bloomberg_ja      = _drop_yahoo(bloomberg_ja)
+    reuters_en        = _drop_yahoo(reuters_en)
+    reuters_ja        = _drop_yahoo(reuters_ja)
+    nikkei            = _drop_yahoo(nikkei)
+    nikkei_cookie     = _drop_yahoo(nikkei_cookie)
+    nsj               = _drop_yahoo(nsj)
+    wsj_en            = _drop_yahoo(wsj_en)
+    wsj_ja            = _drop_yahoo(wsj_ja)
+    tbs_bloomberg     = _drop_yahoo(tbs_bloomberg)
+    sbi_fund          = _drop_yahoo(sbi_fund)
+    yomiuri           = _drop_yahoo(yomiuri)
+    sankei            = _drop_yahoo(sankei)
+
     return {
         "all_full":        all_full,
         "all_8":           all_8,
