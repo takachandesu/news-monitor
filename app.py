@@ -18,6 +18,18 @@ import feedparser
 import streamlit as st
 import streamlit.components.v1 as components
 
+# ★追加: 合成FX機能（独立モジュール、失敗しても既存機能には影響なし）
+try:
+    from synthetic_fx import fetch_synthetic_fx, render_synthetic_fx
+    _HAS_SYNTHETIC_FX = True
+except Exception:
+    # synthetic_fx.py が無くても既存機能は止めない
+    _HAS_SYNTHETIC_FX = False
+    def fetch_synthetic_fx():
+        return {}
+    def render_synthetic_fx(_data):
+        return
+
 # -----------------------------
 # Page / Global CSS
 # -----------------------------
@@ -2447,9 +2459,9 @@ auto_on = st.sidebar.toggle(
     key="auto_on",
 )
 
-# ★デフォルト100本
-limit = st.sidebar.slider("表示件数", 10, 200, int(st.session_state.get("limit_default", 120)), 5)
-title_px = st.sidebar.slider("見出し（ヘッドライン本文）文字サイズ(px)", 12, 26, 20, 1)
+# ★デフォルト160本・文字サイズ16px (ユーザー指定)
+limit = st.sidebar.slider("表示件数", 10, 200, int(st.session_state.get("limit_default", 160)), 5)
+title_px = st.sidebar.slider("見出し（ヘッドライン本文）文字サイズ(px)", 12, 26, 16, 1)
 compact = st.sidebar.toggle("詰めて表示（余白少なめ）", value=True)
 show_source = st.sidebar.toggle("出典を表示", value=True)
 show_time = st.sidebar.toggle("日時を表示", value=True)
@@ -2787,6 +2799,15 @@ _charts_html = """
 })();
 </script>
 """.replace("__PAYLOADS_JSON__", _chart_payloads_json)
+
+# ★追加: 合成FX (土日のみ) + 再計算カード (常時) を既存チャートの上に表示
+# 取得失敗時は何も表示せず、既存チャート・ニュース取得には一切影響しない
+try:
+    _fx_data = fetch_synthetic_fx()
+    if _fx_data:
+        render_synthetic_fx(_fx_data)
+except Exception:
+    pass
 
 components.html(_charts_html, height=270)
 
