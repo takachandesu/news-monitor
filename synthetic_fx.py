@@ -704,44 +704,48 @@ def render_synthetic_fx(data: Dict[str, Any]) -> None:
 .syn-card{
   flex: 1 1 0;
   min-width: 0;
-  background: rgba(255, 255, 255, 0.02);
-  border: 1px solid rgba(245, 180, 0, 0.45);
+  /* 明るめのカード背景にして黒文字を読みやすく */
+  background: rgba(255, 240, 200, 0.95);
+  border: 1.5px solid rgba(200, 140, 0, 0.7);
   border-radius: 8px;
   padding: 6px 10px;
   line-height: 1.15;
   overflow: hidden;
+  color: #111;
 }
 .syn-card.syn-weekend{
-  border-color: rgba(76, 175, 80, 0.55);
-  background: rgba(76, 175, 80, 0.06);
+  border-color: rgba(46, 125, 50, 0.7);
+  background: rgba(200, 240, 210, 0.95);
 }
 .syn-card.syn-dim{ opacity: 0.6; }
 .syn-label{
   font-size: 13px;
-  font-weight: 900;
-  color: #ffd84d;
-  /* 縁取り効果: 2px外周 + 1px補強 + ぼかし */
-  -webkit-text-stroke: 0.6px #000;
-  paint-order: stroke fill;
-  text-shadow:
-    -2px -2px 0 #000, 0 -2px 0 #000, 2px -2px 0 #000,
-    -2px  0   0 #000,                2px  0   0 #000,
-    -2px  2px 0 #000, 0  2px 0 #000, 2px  2px 0 #000,
-    -1px -1px 0 #000,                1px  1px 0 #000,
-     0    0  4px rgba(0,0,0,0.9);
-  letter-spacing: 0.3px;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  font-weight: 800;
+  color: #111;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI",
+    "Hiragino Kaku Gothic ProN", "Yu Gothic UI", "Meiryo", sans-serif;
+  letter-spacing: 0.2px;
+  line-height: 1.25;
+  /* 見切れ防止: 折り返しを許可してすべて表示 */
+  white-space: normal;
+  word-break: keep-all;
+  overflow: visible;
+  text-overflow: clip;
+  margin-bottom: 2px;
 }
+/* 土日カードは緑系背景なので黒文字でも十分読める */
+.syn-card.syn-weekend .syn-label{ color: #0a3d1f; }
 .syn-value{
   font-size: 22px;
   font-weight: 800;
   letter-spacing: 0.5px;
+  color: #111;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI",
+    "Hiragino Kaku Gothic ProN", "Yu Gothic UI", "Meiryo", sans-serif;
 }
 .syn-chg{ font-size: 13px; font-weight: 700; }
-.syn-sub{ font-size: 10px; opacity: 0.65; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;}
-.syn-sub2{ font-size: 10px; opacity: 0.55; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;}
+.syn-sub{ font-size: 10px; color: #555; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;}
+.syn-sub2{ font-size: 10px; color: #444; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;}
 .syn-closed{
   display: inline-block;
   font-size: 9px;
@@ -759,17 +763,11 @@ def render_synthetic_fx(data: Dict[str, Any]) -> None:
 }
 .syn-weekend-title{
   font-size: 13px;
-  font-weight: 900;
-  color: #7dffa0;
-  -webkit-text-stroke: 0.6px #000;
-  paint-order: stroke fill;
-  text-shadow:
-    -2px -2px 0 #000, 0 -2px 0 #000, 2px -2px 0 #000,
-    -2px  0   0 #000,                2px  0   0 #000,
-    -2px  2px 0 #000, 0  2px 0 #000, 2px  2px 0 #000,
-    -1px -1px 0 #000,                1px  1px 0 #000,
-     0    0  4px rgba(0,0,0,0.9);
-  letter-spacing: 0.3px;
+  font-weight: 800;
+  color: #0a3d1f;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI",
+    "Hiragino Kaku Gothic ProN", "Yu Gothic UI", "Meiryo", sans-serif;
+  letter-spacing: 0.2px;
   margin-bottom: 4px;
 }
 </style>
