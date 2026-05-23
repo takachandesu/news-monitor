@@ -554,6 +554,39 @@ def render_synthetic_fx(data: Dict[str, Any]) -> None:
     既存3チャート(TradingView)の真上に、再計算値と土日合成値を表示する。
     既存の render_items() には一切触らない。
     """
+    # ★★★ デバッグバナー (原因特定後に削除する) ★★★
+    try:
+        _dbg_lines = []
+        _dbg_lines.append(f"data is None? {data is None}")
+        if data:
+            _dbg_lines.append(f"is_weekend = {data.get('is_weekend')}")
+            _dbg_lines.append(f"synth_usdjpy = {data.get('synth_usdjpy')}")
+            _dbg_lines.append(f"sekai keys = {list((data.get('sekai') or {}).keys())}")
+            _dbg_lines.append(f"sekai_error = {data.get('sekai_error')}")
+            _dbg_lines.append(f"recalc keys = {list((data.get('recalc') or {}).keys())}")
+            _dbg_lines.append(f"recalc jp225 = {data.get('recalc',{}).get('jp225')}")
+            _dbg_lines.append(f"now_jst = {data.get('now_jst')}")
+        else:
+            _dbg_lines.append("data is empty/None — fetch_synthetic_fx returned nothing")
+        _dbg = "<br/>".join(_dbg_lines)
+        st.markdown(
+            f'<div style="background:#fff3cd;border:2px solid #f5b400;'
+            f'padding:8px;margin:4px 0;font-family:monospace;font-size:12px;'
+            f'color:#5a4500;border-radius:6px;">'
+            f'<b>🔧 SYNTHETIC_FX DEBUG (原因特定用・後で消す)</b><br/>'
+            f'{_dbg}'
+            f'</div>',
+            unsafe_allow_html=True
+        )
+    except Exception as _e:
+        st.markdown(
+            f'<div style="background:#ffebee;border:2px solid #d32f2f;padding:8px;">'
+            f'❌ DEBUG出力でも例外: {type(_e).__name__}: {_e}'
+            f'</div>',
+            unsafe_allow_html=True
+        )
+    # ★★★ デバッグここまで ★★★
+
     if not data:
         return
     is_we = data.get("is_weekend", False)
@@ -781,4 +814,27 @@ def render_synthetic_fx(data: Dict[str, Any]) -> None:
   margin: 8px 0;
   background: rgba(76, 175, 80, 0.03);
 }
-.syn-weekend-ti
+.syn-weekend-title{
+  font-size: 13px;
+  font-weight: 800;
+  color: #0a3d1f;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI",
+    "Hiragino Kaku Gothic ProN", "Yu Gothic UI", "Meiryo", sans-serif;
+  letter-spacing: 0.2px;
+  margin-bottom: 2px;
+}
+.syn-weekend-subtitle{
+  font-size: 11px;
+  font-weight: 600;
+  color: #1b5e20;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI",
+    "Hiragino Kaku Gothic ProN", "Yu Gothic UI", "Meiryo", sans-serif;
+  margin-bottom: 6px;
+  letter-spacing: 0.1px;
+}
+</style>
+__WEEKEND__
+<div class="syn-wrap">__RECALC__</div>
+""".replace("__RECALC__", recalc_row).replace("__WEEKEND__", weekend_html)
+
+    st.markdown(html, unsafe_allow_html=True)
