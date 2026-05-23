@@ -130,11 +130,22 @@ def _compute_synth_usdjpy() -> Optional[Dict[str, Any]]:
     btc_jpy = _fetch_btc_jpy_bitflyer()
     btc_usd = _fetch_btc_usdt_binance()
     if not btc_jpy or not btc_usd:
-        return None
+        # 失敗理由を残す
+        return {
+            "value": None,
+            "btc_jpy": btc_jpy,
+            "btc_usd": btc_usd,
+            "error": (
+                "bitFlyer & Binance 両方失敗" if (not btc_jpy and not btc_usd)
+                else "bitFlyer (BTC/JPY) 取得失敗" if not btc_jpy
+                else "Binance (BTC/USDT) 取得失敗"
+            ),
+        }
     return {
         "value": btc_jpy / btc_usd,
         "btc_jpy": btc_jpy,
         "btc_usd": btc_usd,
+        "error": None,
     }
 
 
@@ -222,10 +233,11 @@ def _parse_sekai_q_calls(text: str) -> Dict[str, Dict[str, float]]:
     return out
 
 
-def _fetch_sekai_indices() -> Optional[Dict[str, Dict[str, float]]]:
+def _fetch_sekai_indices() -> Dict[str, Any]:
+    """sekai-kabuka.com からダウ/NAS100/VIX を取得。常にdictを返し、失敗時は status に理由を入れる"""
     url = _discover_sekai_data_url()
     if not url:
-        return None
+        return {"data": {}, "error": "URL抽出失敗(HTML/Secrets共に取れず)", "url": None}
     r = _safe_get(url, headers={
         "Accept": "*/*",
         "Accept-Language": "ja,en-US;q=0.9",
@@ -236,16 +248,17 @@ def _fetch_sekai_indices() -> Optional[Dict[str, Dict[str, float]]]:
         "Sec-Fetch-Site": "same-site",
     }, timeout=10)
     if not r:
-        return None
+        return {"data": {}, "error": "データURLへのGETが失敗", "url": url}
     # requestsは Content-Encoding: gzip を自動展開する
     try:
-        # 中身は ASCII数字 + 半角カナSVGなので、decode失敗しても数字部分は取れる
         text = r.content.decode("shift_jis", errors="ignore")
     except Exception:
         text = r.text or ""
 
     parsed = _parse_sekai_q_calls(text)
-    return parsed if parsed else None
+    if not parsed:
+        return {"data": {}, "error": "q()パターンが見つからず", "url": url}
+    return {"data": parsed, "error": None, "url": url}
 
 
 # =====================================================
@@ -398,41 +411,43 @@ def fetch_synthetic_fx() -> Dict[str, Any]:
 
         # 土日のみ: 合成USDJPY と sekai-kabuka
         synth_usdjpy = None
-        sekai = None
+        sekai_result: Dict[str, Any] = {"data": {}, "error": None, "url": None}
         if is_we:
             try:
                 synth_usdjpy = _compute_synth_usdjpy()
-            except Exception:
-                synth_usdjpy = None
+            except Exception as e:
+                synth_usdjpy = {"value": None, "error": f"例外: {type(e).__name__}"}
             try:
-                sekai = _fetch_sekai_indices()
-            except Exception:
-                sekai = None
+                sekai_result = _fetch_sekai_indices()
+            except Exception as e:
+                sekai_result = {"data": {}, "error": f"例外: {type(e).__name__}", "url": None}
 
-        # 平日も土日も: Yahoo経由の再計算 (JP225 / US100 / USDJPY)
+        # 平日も土日も: Yahoo経由の再計算
         recalc: Dict[str, Optional[dict]] = {"jp225": None, "us100": None, "usdjpy": None}
         try:
-            # 日経225 (^N225) を JST 15:30 基準で再計算
             recalc["jp225"] = _compute_recalc("^N225", 15, 30, "JST")
         except Exception:
             pass
         try:
-            # NASDAQ100 (^NDX) を ET 16:00 基準で再計算
             recalc["us100"] = _compute_recalc("^NDX", 16, 0, "ET")
         except Exception:
             pass
         try:
-            # USDJPY (JPY=X) を ET 16:00 基準で再計算
             recalc["usdjpy"] = _compute_recalc("JPY=X", 16, 0, "ET")
         except Exception:
             pass
 
+        # 現在JST時刻
+        nowjst = _now_jst()
         data = {
             "is_weekend": is_we,
             "synth_usdjpy": synth_usdjpy,
-            "sekai": sekai,
+            "sekai": sekai_result.get("data", {}),
+            "sekai_error": sekai_result.get("error"),
+            "sekai_url": sekai_result.get("url"),
             "recalc": recalc,
-            "as_of": _now_jst().strftime("%H:%M:%S JST"),
+            "as_of": nowjst.strftime("%H:%M:%S JST"),
+            "now_jst": nowjst.strftime("%Y/%m/%d (%a) %H:%M:%S JST"),
         }
         with _SYN_CACHE_LOCK:
             _SYN_CACHE["data"] = data
@@ -456,14 +471,20 @@ def render_synthetic_fx(data: Dict[str, Any]) -> None:
     recalc = data.get("recalc") or {}
     synth = data.get("synth_usdjpy")
     sekai = data.get("sekai") or {}
+    sekai_error = data.get("sekai_error")
+    now_jst = data.get("now_jst", "")
 
-    # 表示するカードを組み立てる
-    cards_html = ""
-
-    # --- 再計算カード (平日も表示) ---
-    def _recalc_card(label: str, sym: str, info: Optional[dict], unit: str = "") -> str:
+    # ================================================
+    # 1段目: 再計算カード (常時表示・既存3チャートと同じ並び)
+    # ================================================
+    def _recalc_card(label: str, info: Optional[dict], unit: str = "") -> str:
         if not info:
-            return f'<div class="syn-card syn-dim"><div class="syn-label">{label}</div><div class="syn-value">--</div><div class="syn-sub">取得失敗</div></div>'
+            return (
+                f'<div class="syn-card syn-dim">'
+                f'<div class="syn-label">{label}</div>'
+                f'<div class="syn-value">--</div>'
+                f'<div class="syn-sub">取得失敗</div></div>'
+            )
         cur = info.get("current") or 0
         chg = info.get("change") or 0
         pct = info.get("change_pct") or 0
@@ -474,67 +495,116 @@ def render_synthetic_fx(data: Dict[str, Any]) -> None:
         cur_fmt = f"{cur:,.3f}" if abs(cur) < 1000 else f"{cur:,.2f}"
         chg_fmt = f"{sign}{chg:,.2f}"
         pct_fmt = f"{sign}{pct:.2f}%"
+        # 市場休場中なら強調表示
+        is_closed = abs(chg) < 0.001
+        closed_badge = '<span class="syn-closed">市場休場中</span>' if is_closed else ''
         return (
             f'<div class="syn-card">'
-            f'<div class="syn-label">{label}</div>'
+            f'<div class="syn-label">{label} {closed_badge}</div>'
             f'<div class="syn-value" style="color:{color};">{cur_fmt}{unit}</div>'
             f'<div class="syn-chg" style="color:{color};">{chg_fmt} ({pct_fmt})</div>'
             f'<div class="syn-sub">基準 {anchor:,.2f} @ {atime}</div>'
             f'</div>'
         )
 
-    cards_html += _recalc_card("🇯🇵 JP225 (15:30 JST起点)", "^N225", recalc.get("jp225"))
-    cards_html += _recalc_card("🇺🇸 US100 (16:00 ET起点)", "^NDX",  recalc.get("us100"))
-    cards_html += _recalc_card("💴 USDJPY (16:00 ET起点)", "JPY=X", recalc.get("usdjpy"))
+    recalc_row = (
+        _recalc_card("🇯🇵 JP225 (15:30 JST起点)", recalc.get("jp225"))
+        + _recalc_card("🇺🇸 US100 (16:00 ET起点)", recalc.get("us100"))
+        + _recalc_card("💴 USDJPY (16:00 ET起点)", recalc.get("usdjpy"))
+    )
 
-    # --- 土日カード (土日のみ表示) ---
+    # ================================================
+    # 2段目: 土日カード (is_weekendがTrueの時のみ表示・失敗時は理由表示)
+    # ================================================
+    weekend_row = ""
     if is_we:
+        # 合成USDJPY
         if synth and synth.get("value"):
             v = synth["value"]
-            cards_html += (
+            weekend_row += (
                 f'<div class="syn-card syn-weekend">'
-                f'<div class="syn-label">🟡 合成 USD/JPY (土日)</div>'
+                f'<div class="syn-label">🟡 合成USD/JPY (土日)</div>'
                 f'<div class="syn-value">{v:,.3f}</div>'
-                f'<div class="syn-sub">bitFlyer ÷ Binance / {data.get("as_of","")}</div>'
+                f'<div class="syn-sub">bitFlyer BTC/JPY ÷ Binance BTC/USDT</div>'
                 f'</div>'
             )
-        for key, label, emoji in [("dow", "ダウ 24h CFD (土日)", "🇺🇸"),
-                                  ("nas100", "NASDAQ100 24h (土日)", "🇺🇸"),
-                                  ("vix", "VIX (土日参考値)", "😱")]:
-            if key in sekai:
-                lo = sekai[key]["low"]
-                hi = sekai[key]["high"]
-                cards_html += (
-                    f'<div class="syn-card syn-weekend">'
-                    f'<div class="syn-label">{emoji} {label}</div>'
-                    f'<div class="syn-value">{(lo+hi)/2:,.2f}</div>'
-                    f'<div class="syn-sub">本日レンジ {lo:,.2f} 〜 {hi:,.2f}</div>'
-                    f'</div>'
-                )
+        elif synth and synth.get("error"):
+            weekend_row += (
+                f'<div class="syn-card syn-weekend syn-dim">'
+                f'<div class="syn-label">🟡 合成USD/JPY (土日)</div>'
+                f'<div class="syn-value">--</div>'
+                f'<div class="syn-sub">取得失敗: {synth.get("error","")}</div>'
+                f'</div>'
+            )
 
-    if not cards_html:
-        return
+        # sekai-kabuka 由来 (ダウ/NAS/VIX)
+        labels = {
+            "dow":    ("🇺🇸 ダウ 24h CFD (土日)", ""),
+            "nas100": ("🇺🇸 NASDAQ100 24h (土日)", ""),
+            "vix":    ("😱 VIX (土日参考値)", ""),
+        }
+        if sekai:
+            for key, (lbl, unit) in labels.items():
+                if key in sekai:
+                    lo = sekai[key]["low"]
+                    hi = sekai[key]["high"]
+                    weekend_row += (
+                        f'<div class="syn-card syn-weekend">'
+                        f'<div class="syn-label">{lbl}</div>'
+                        f'<div class="syn-value">{(lo+hi)/2:,.2f}{unit}</div>'
+                        f'<div class="syn-sub">本日レンジ {lo:,.2f} 〜 {hi:,.2f}</div>'
+                        f'</div>'
+                    )
+        if not sekai and sekai_error:
+            weekend_row += (
+                f'<div class="syn-card syn-weekend syn-dim">'
+                f'<div class="syn-label">🌐 sekai-kabuka (ダウ/NAS/VIX)</div>'
+                f'<div class="syn-value">--</div>'
+                f'<div class="syn-sub">取得失敗: {sekai_error}</div>'
+                f'</div>'
+            )
+
+        if not weekend_row:
+            weekend_row = (
+                f'<div class="syn-card syn-weekend syn-dim">'
+                f'<div class="syn-label">土日機能</div>'
+                f'<div class="syn-value">--</div>'
+                f'<div class="syn-sub">データ取得失敗・後ほど再試行</div>'
+                f'</div>'
+            )
+    # 平日は土日行は出さない
+
+    # ================================================
+    # 出力
+    # ================================================
+    weekend_html = (
+        f'<div class="syn-wrap syn-weekend-wrap">'
+        f'<div class="syn-weekend-title">📅 土日モード ({now_jst})</div>'
+        f'<div class="syn-wrap" style="margin:0;">{weekend_row}</div>'
+        f'</div>'
+    ) if weekend_row else ""
 
     html = """
 <style>
 .syn-wrap{
   display:flex; gap:6px; margin: 4px 0 8px 0;
-  flex-wrap: wrap; align-items: stretch;
+  flex-wrap: nowrap; align-items: stretch;
 }
 .syn-card{
   flex: 1 1 0;
-  min-width: 150px;
+  min-width: 0;
   background: rgba(255, 255, 255, 0.02);
   border: 1px solid rgba(245, 180, 0, 0.45);
   border-radius: 8px;
   padding: 6px 10px;
   line-height: 1.15;
+  overflow: hidden;
 }
 .syn-card.syn-weekend{
   border-color: rgba(76, 175, 80, 0.55);
   background: rgba(76, 175, 80, 0.06);
 }
-.syn-card.syn-dim{ opacity: 0.5; }
+.syn-card.syn-dim{ opacity: 0.6; }
 .syn-label{
   font-size: 11px;
   font-weight: 700;
@@ -551,11 +621,30 @@ def render_synthetic_fx(data: Dict[str, Any]) -> None:
 }
 .syn-chg{ font-size: 13px; font-weight: 700; }
 .syn-sub{ font-size: 10px; opacity: 0.65; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;}
-/* TradingViewウィジェット内のラベル(銘柄名・終値)を隠したい場合は、
-   embed側がiframeなので外からは触れない。
-   代わりに、上のラベルを大きく出すことで視線を奪う方針。 */
+.syn-closed{
+  display: inline-block;
+  font-size: 9px;
+  background: #888; color: #fff;
+  padding: 1px 4px; border-radius: 3px;
+  margin-left: 4px; font-weight: 600;
+}
+.syn-weekend-wrap{
+  display: block;
+  border: 1px dashed rgba(76, 175, 80, 0.5);
+  border-radius: 8px;
+  padding: 6px;
+  margin: 8px 0;
+  background: rgba(76, 175, 80, 0.03);
+}
+.syn-weekend-title{
+  font-size: 11px;
+  font-weight: 700;
+  color: #4caf50;
+  margin-bottom: 4px;
+}
 </style>
-<div class="syn-wrap">__CARDS__</div>
-""".replace("__CARDS__", cards_html)
+<div class="syn-wrap">__RECALC__</div>
+__WEEKEND__
+""".replace("__RECALC__", recalc_row).replace("__WEEKEND__", weekend_html)
 
     st.markdown(html, unsafe_allow_html=True)
