@@ -490,6 +490,41 @@ def fetch_synthetic_fx() -> Dict[str, Any]:
         except Exception:
             pass
 
+        # ★ 土日の前日比%計算用: 金曜終値を別取得 (^DJI, ^NDX, ^VIX, JPY=X)
+        # recalcのanchorは「直近の(JST15:30 or ET16:00)時刻のバー」を取るので
+        # 土日にはそれが金曜終値になり、これを「金曜終値」として使う。
+        # NDX/USDJPYはrecalcに既に入っているので流用、Dow/VIXは新規取得。
+        prev_closes: Dict[str, Optional[float]] = {
+            "dow":    None,
+            "nas100": None,
+            "vix":    None,
+            "usdjpy": None,
+        }
+        if is_we:
+            try:
+                _dji = _compute_recalc("^DJI", 16, 0, "ET")
+                if _dji and _dji.get("anchor"):
+                    prev_closes["dow"] = float(_dji["anchor"])
+            except Exception:
+                pass
+            try:
+                _vix = _compute_recalc("^VIX", 16, 0, "ET")
+                if _vix and _vix.get("anchor"):
+                    prev_closes["vix"] = float(_vix["anchor"])
+            except Exception:
+                pass
+            # NAS100とUSDJPYは既に取得済みのrecalcから流用
+            try:
+                if recalc.get("us100") and recalc["us100"].get("anchor"):
+                    prev_closes["nas100"] = float(recalc["us100"]["anchor"])
+            except Exception:
+                pass
+            try:
+                if recalc.get("usdjpy") and recalc["usdjpy"].get("anchor"):
+                    prev_closes["usdjpy"] = float(recalc["usdjpy"]["anchor"])
+            except Exception:
+                pass
+
         # 現在JST時刻
         nowjst = _now_jst()
         data = {
@@ -499,6 +534,7 @@ def fetch_synthetic_fx() -> Dict[str, Any]:
             "sekai_error": sekai_result.get("error"),
             "sekai_url": sekai_result.get("url"),
             "recalc": recalc,
+            "prev_closes": prev_closes,
             "as_of": nowjst.strftime("%H:%M:%S JST"),
             "now_jst": nowjst.strftime("%Y/%m/%d (%a) %H:%M:%S JST"),
         }
@@ -571,13 +607,32 @@ def render_synthetic_fx(data: Dict[str, Any]) -> None:
     # ================================================
     weekend_row = ""
     if is_we:
+        prev_closes = data.get("prev_closes") or {}
+
+        def _chg_html(current_val: float, prev_close: Optional[float]) -> str:
+            """金曜終値からの変化金額と変化率をHTMLで返す"""
+            if not prev_close or prev_close <= 0 or not current_val:
+                return ''
+            chg = current_val - prev_close
+            pct = (chg / prev_close) * 100.0
+            color = "#1aaa55" if chg >= 0 else "#d32f2f"
+            sign = "+" if chg >= 0 else ""
+            return (
+                f'<div class="syn-chg" style="color:{color};">'
+                f'{sign}{chg:,.2f} ({sign}{pct:.2f}%)'
+                f'</div>'
+                f'<div class="syn-sub2">金曜終値 {prev_close:,.2f} 基準</div>'
+            )
+
         # 合成USDJPY
         if synth and synth.get("value"):
             v = synth["value"]
+            chg_html = _chg_html(v, prev_closes.get("usdjpy"))
             weekend_row += (
                 f'<div class="syn-card syn-weekend">'
                 f'<div class="syn-label">🟡 合成USD/JPY (土日)</div>'
                 f'<div class="syn-value">{v:,.3f}</div>'
+                f'{chg_html}'
                 f'<div class="syn-sub">bitFlyer BTC/JPY ÷ Binance BTC/USDT</div>'
                 f'</div>'
             )
@@ -601,10 +656,13 @@ def render_synthetic_fx(data: Dict[str, Any]) -> None:
                 if key in sekai:
                     lo = sekai[key]["low"]
                     hi = sekai[key]["high"]
+                    mid = (lo + hi) / 2
+                    chg_html = _chg_html(mid, prev_closes.get(key))
                     weekend_row += (
                         f'<div class="syn-card syn-weekend">'
                         f'<div class="syn-label">{lbl}</div>'
-                        f'<div class="syn-value">{(lo+hi)/2:,.2f}{unit}</div>'
+                        f'<div class="syn-value">{mid:,.2f}{unit}</div>'
+                        f'{chg_html}'
                         f'<div class="syn-sub">本日レンジ {lo:,.2f} 〜 {hi:,.2f}</div>'
                         f'</div>'
                     )
@@ -659,10 +717,19 @@ def render_synthetic_fx(data: Dict[str, Any]) -> None:
 }
 .syn-card.syn-dim{ opacity: 0.6; }
 .syn-label{
-  font-size: 11px;
-  font-weight: 700;
-  color: #f5b400;
-  text-shadow: 0 0 2px rgba(0,0,0,0.5);
+  font-size: 13px;
+  font-weight: 900;
+  color: #ffd84d;
+  /* 縁取り効果: 2px外周 + 1px補強 + ぼかし */
+  -webkit-text-stroke: 0.6px #000;
+  paint-order: stroke fill;
+  text-shadow:
+    -2px -2px 0 #000, 0 -2px 0 #000, 2px -2px 0 #000,
+    -2px  0   0 #000,                2px  0   0 #000,
+    -2px  2px 0 #000, 0  2px 0 #000, 2px  2px 0 #000,
+    -1px -1px 0 #000,                1px  1px 0 #000,
+     0    0  4px rgba(0,0,0,0.9);
+  letter-spacing: 0.3px;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -674,6 +741,7 @@ def render_synthetic_fx(data: Dict[str, Any]) -> None:
 }
 .syn-chg{ font-size: 13px; font-weight: 700; }
 .syn-sub{ font-size: 10px; opacity: 0.65; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;}
+.syn-sub2{ font-size: 10px; opacity: 0.55; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;}
 .syn-closed{
   display: inline-block;
   font-size: 9px;
@@ -690,9 +758,18 @@ def render_synthetic_fx(data: Dict[str, Any]) -> None:
   background: rgba(76, 175, 80, 0.03);
 }
 .syn-weekend-title{
-  font-size: 11px;
-  font-weight: 700;
-  color: #4caf50;
+  font-size: 13px;
+  font-weight: 900;
+  color: #7dffa0;
+  -webkit-text-stroke: 0.6px #000;
+  paint-order: stroke fill;
+  text-shadow:
+    -2px -2px 0 #000, 0 -2px 0 #000, 2px -2px 0 #000,
+    -2px  0   0 #000,                2px  0   0 #000,
+    -2px  2px 0 #000, 0  2px 0 #000, 2px  2px 0 #000,
+    -1px -1px 0 #000,                1px  1px 0 #000,
+     0    0  4px rgba(0,0,0,0.9);
+  letter-spacing: 0.3px;
   margin-bottom: 4px;
 }
 </style>
