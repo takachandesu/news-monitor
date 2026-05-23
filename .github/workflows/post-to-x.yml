@@ -2,7 +2,7 @@ name: Post breaking news to X
 
 on:
   schedule:
-    - cron: '*/10 * * * *'      # 10分おき（UTC、ただし JST/UTC で結果は同じ）
+    - cron: '2,17,32,47 * * * *' # 毎時 :02, :17, :32, :47（news取得の1分後）      # 10分おき（UTC、ただし JST/UTC で結果は同じ）
   workflow_dispatch:             # 手動実行も可能
 
 permissions:
