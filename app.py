@@ -19,12 +19,13 @@ import streamlit as st
 import streamlit.components.v1 as components
 
 # ★追加: 合成FX機能（独立モジュール、失敗しても既存機能には影響なし）
-_SYNTHETIC_FX_IMPORT_ERROR = None  # importエラーを記録（一時デバッグ用）
+# import失敗時の理由は _SYNTHETIC_FX_IMPORT_ERROR に保持し、本体描画時に小さく表示する
+_SYNTHETIC_FX_IMPORT_ERROR = None
+_SYNTHETIC_FX_IMPORT_TRACEBACK = None
 try:
     from synthetic_fx import fetch_synthetic_fx, render_synthetic_fx
     _HAS_SYNTHETIC_FX = True
 except Exception as _e:
-    # synthetic_fx.py が無くても既存機能は止めない
     _HAS_SYNTHETIC_FX = False
     _SYNTHETIC_FX_IMPORT_ERROR = f"{type(_e).__name__}: {_e}"
     import traceback as _tb
@@ -2849,17 +2850,12 @@ _charts_html = """
 """.replace("__PAYLOADS_JSON__", _chart_payloads_json)
 
 # ★追加: 合成FX (土日のみ) + 再計算カード (常時) を既存チャートの上に表示
-# 一時デバッグ: 例外を画面に表示する
+# import失敗時は小さく赤バナーで通知（過去にファイル破損による無音失敗があったため）
 if _SYNTHETIC_FX_IMPORT_ERROR:
     st.markdown(
-        f'<div style="background:#ffebee;border:2px solid #d32f2f;padding:10px;'
-        f'margin:4px 0;font-family:monospace;font-size:12px;color:#b71c1c;'
-        f'border-radius:6px;">'
-        f'<b>❌ synthetic_fx.py の import 失敗:</b><br/>'
-        f'{_SYNTHETIC_FX_IMPORT_ERROR}<br/><br/>'
-        f'<b>Traceback:</b><br/>'
-        f'<pre style="background:#fff;padding:6px;font-size:11px;'
-        f'white-space:pre-wrap;color:#333;">{_SYNTHETIC_FX_IMPORT_TRACEBACK}</pre>'
+        f'<div style="background:#ffebee;border:1px solid #d32f2f;padding:6px;'
+        f'margin:4px 0;font-size:11px;color:#b71c1c;border-radius:4px;">'
+        f'⚠️ 合成FX機能が読み込めません: {_SYNTHETIC_FX_IMPORT_ERROR}'
         f'</div>',
         unsafe_allow_html=True
     )
@@ -2867,28 +2863,8 @@ try:
     _fx_data = fetch_synthetic_fx()
     if _fx_data:
         render_synthetic_fx(_fx_data)
-    else:
-        st.markdown(
-            '<div style="background:#fff3cd;border:2px solid #f5b400;padding:8px;'
-            'margin:4px 0;font-family:monospace;font-size:12px;color:#5a4500;'
-            'border-radius:6px;">⚠️ fetch_synthetic_fx() が空dictを返しました '
-            '(関数内のtry/exceptで例外を握りつぶしている可能性)</div>',
-            unsafe_allow_html=True
-        )
-except Exception as _e:
-    import traceback as _tb_call
-    st.markdown(
-        f'<div style="background:#ffebee;border:2px solid #d32f2f;padding:10px;'
-        f'margin:4px 0;font-family:monospace;font-size:12px;color:#b71c1c;'
-        f'border-radius:6px;">'
-        f'<b>❌ render_synthetic_fx() で例外:</b><br/>'
-        f'{type(_e).__name__}: {_e}<br/><br/>'
-        f'<b>Traceback:</b><br/>'
-        f'<pre style="background:#fff;padding:6px;font-size:11px;'
-        f'white-space:pre-wrap;color:#333;">{_tb_call.format_exc()}</pre>'
-        f'</div>',
-        unsafe_allow_html=True
-    )
+except Exception:
+    pass  # 既存チャート・ニュース取得には一切影響させない
 
 components.html(_charts_html, height=270)
 
