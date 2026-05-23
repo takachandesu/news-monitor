@@ -458,6 +458,19 @@ def fetch_nikkei225jp_news_all1() -> Dict[str, object]:
             if s and len(s) <= 30 and "http" not in s.lower() and not re.fullmatch(r"\d+", s):
                 source = s
 
+        # ★ Yahoo! 由来の記事は除外（ユーザー指定）
+        # source が "Yahoo!" / "Yahoo" / "ヤフー" 等のいずれかで始まる場合スキップ。
+        # URL が news.yahoo.co.jp / topics.yahoo.co.jp 等の場合もスキップ（取りこぼし防止）。
+        _src_lower = source.lower()
+        _url_lower = url.lower()
+        if (
+            "yahoo" in _src_lower
+            or "ヤフー" in source
+            or "yahoo.co.jp" in _url_lower
+            or "yahoo.com" in _url_lower
+        ):
+            continue
+
         items.append({"source": source, "title": title, "url": url, "published": normalize_dt(published)})
 
     items = sort_items(dedupe(items))
