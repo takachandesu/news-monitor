@@ -36,9 +36,9 @@ BINANCE_TICKER_URL  = "https://api.binance.com/api/v3/ticker/price?symbol=BTCUSD
 
 # ----- sekai-kabuka.com -----
 SEKAI_HOME_URL = "https://sekai-kabuka.com/pc-dow30.html"
-# 初回ロードのデータURLパターン: 49-212-X-Y.sekai-kabuka.com/-.<長い乱数>.<17文字hash>.1.js
+# データURLパターン (柔軟版): //や http:// にも対応
 SEKAI_DATA_URL_PATTERN = re.compile(
-    r'https?://49-212-\d+-\d+\.sekai-kabuka\.com/[^\s"\'<>]+\.1\.js'
+    r'(?:https?:)?//[a-z0-9-]+\.sekai-kabuka\.com/[^\s"\'<>]+\.1\.js'
 )
 
 # ----- Yahoo Finance (再計算用) -----
@@ -102,28 +102,74 @@ def _safe_get(url: str, headers: Optional[dict] = None, timeout: int = 8) -> Opt
 # =====================================================
 # (1) 合成 USD/JPY  =  bitFlyer BTC/JPY  ÷  Binance BTC/USDT
 # =====================================================
-def _fetch_btc_jpy_bitflyer() -> Optional[float]:
-    r = _safe_get(BITFLYER_TICKER_URL)
-    if not r:
-        return None
-    try:
-        j = r.json()
-        ltp = float(j.get("ltp") or 0)
-        return ltp if ltp > 0 else None
-    except Exception:
-        return None
-
-
 def _fetch_btc_usdt_binance() -> Optional[float]:
-    r = _safe_get(BINANCE_TICKER_URL)
-    if not r:
-        return None
-    try:
-        j = r.json()
-        p = float(j.get("price") or 0)
-        return p if p > 0 else None
-    except Exception:
-        return None
+    """
+    BTC/USDT (≈ BTC/USD) を取得。Binanceが地域ブロックされている環境(Streamlit Cloud等)
+    でも動くように、複数ソースを順に試す。
+    返り値はFloat (USD建て価格)。すべて失敗ならNone。
+    """
+    # 各ソース: (URL, JSONからfloatを取り出す関数)
+    sources = [
+        # 1. Binance 本家
+        ("https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT",
+         lambda j: float(j["price"])),
+        # 2. Binance Vision (公開ミラー)
+        ("https://data-api.binance.vision/api/v3/ticker/price?symbol=BTCUSDT",
+         lambda j: float(j["price"])),
+        # 3. Bybit (USDT価格)
+        ("https://api.bybit.com/v5/market/tickers?category=spot&symbol=BTCUSDT",
+         lambda j: float(j["result"]["list"][0]["lastPrice"])),
+        # 4. CoinGecko (BTC を USD建てで取得 - ステーブルコインなのでUSDT≒USD)
+        ("https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd",
+         lambda j: float(j["bitcoin"]["usd"])),
+        # 5. Coinbase (現物価格)
+        ("https://api.coinbase.com/v2/prices/BTC-USD/spot",
+         lambda j: float(j["data"]["amount"])),
+    ]
+    for url, picker in sources:
+        try:
+            r = _safe_get(url, timeout=5)
+            if not r:
+                continue
+            j = r.json()
+            val = picker(j)
+            if val and val > 0:
+                return val
+        except Exception:
+            continue
+    return None
+
+
+def _fetch_btc_jpy_bitflyer() -> Optional[float]:
+    """
+    BTC/JPY を取得。bitFlyer 第一優先、ダメなら他取引所/CoinGecko。
+    """
+    sources = [
+        # 1. bitFlyer (国内現物BTC/JPY)
+        ("https://api.bitflyer.com/v1/ticker?product_code=BTC_JPY",
+         lambda j: float(j.get("ltp") or 0)),
+        # 2. Coincheck (国内BTC/JPY)
+        ("https://coincheck.com/api/ticker",
+         lambda j: float(j.get("last") or 0)),
+        # 3. GMOコイン (国内BTC/JPY)
+        ("https://api.coin.z.com/public/v1/ticker?symbol=BTC_JPY",
+         lambda j: float(j["data"][0]["last"])),
+        # 4. CoinGecko (BTC JPY建て)
+        ("https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=jpy",
+         lambda j: float(j["bitcoin"]["jpy"])),
+    ]
+    for url, picker in sources:
+        try:
+            r = _safe_get(url, timeout=5)
+            if not r:
+                continue
+            j = r.json()
+            val = picker(j)
+            if val and val > 0:
+                return val
+        except Exception:
+            continue
+    return None
 
 
 def _compute_synth_usdjpy() -> Optional[Dict[str, Any]]:
@@ -154,22 +200,24 @@ def _compute_synth_usdjpy() -> Optional[Dict[str, Any]]:
 # =====================================================
 def _discover_sekai_data_url() -> Optional[str]:
     """
-    1) Streamlit Secrets に手動URLがあればそれを使う (緊急上書き用)
-    2) https://sekai-kabuka.com/pc-dow30.html を取得し
-       <script src="https://49-212-X-Y.sekai-kabuka.com/-.xxxxx.1.js"> を抽出
-    3) 取れなかったら前回成功URLを使う (フォールバック)
+    1) Streamlit Secrets の manual_url があればそれを使う (推奨運用)
+    2) HTMLを取得しURLを抽出（JS生成だと失敗する可能性が高い）
+    3) 前回成功URLをフォールバック
     """
     global _LAST_SEKAI_DATA_URL
 
-    # 1) 手動上書き (緊急時)
+    # 1) 手動上書き (推奨)
     try:
         manual = st.secrets.get("sekai_kabuka", {}).get("manual_url", "")
-        if manual and isinstance(manual, str) and manual.startswith("http"):
-            return manual.strip()
+        if manual and isinstance(manual, str) and manual.strip():
+            url = manual.strip()
+            if url.startswith("//"):
+                url = "https:" + url
+            return url
     except Exception:
         pass
 
-    # 2) HTML を取得して正規表現抽出
+    # 2) HTML を取得して正規表現抽出 (複数エンコーディングで試す)
     r = _safe_get(SEKAI_HOME_URL, headers={
         "Accept": "text/html,application/xhtml+xml",
         "Accept-Language": "ja,en-US;q=0.9",
@@ -177,13 +225,18 @@ def _discover_sekai_data_url() -> Optional[str]:
         "Referer": "https://sekai-kabuka.com/",
     }, timeout=10)
     if r is not None:
-        # ページは Shift_JIS が多いが、URL部分は ASCII なので encoding を気にしなくて良い
-        text = r.content.decode("ascii", errors="ignore")
-        m = SEKAI_DATA_URL_PATTERN.search(text)
-        if m:
-            url = m.group(0)
-            _LAST_SEKAI_DATA_URL = url
-            return url
+        for enc in ("ascii", "utf-8", "shift_jis"):
+            try:
+                text = r.content.decode(enc, errors="ignore")
+            except Exception:
+                continue
+            m = SEKAI_DATA_URL_PATTERN.search(text)
+            if m:
+                url = m.group(0)
+                if url.startswith("//"):
+                    url = "https:" + url
+                _LAST_SEKAI_DATA_URL = url
+                return url
 
     # 3) 前回成功URL
     return _LAST_SEKAI_DATA_URL
@@ -643,8 +696,8 @@ def render_synthetic_fx(data: Dict[str, Any]) -> None:
   margin-bottom: 4px;
 }
 </style>
-<div class="syn-wrap">__RECALC__</div>
 __WEEKEND__
+<div class="syn-wrap">__RECALC__</div>
 """.replace("__RECALC__", recalc_row).replace("__WEEKEND__", weekend_html)
 
     st.markdown(html, unsafe_allow_html=True)
