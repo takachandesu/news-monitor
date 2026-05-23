@@ -2658,7 +2658,7 @@ def _tv_widget_block(symbol: str, kind: str = "mini", color_theme: str = "light"
     if kind == "overview":
         cfg = {
             "symbols": [[symbol + "|1D"]],
-            "chartOnly": False,
+            "chartOnly": True,
             "width": "100%",
             "height": "220",
             "locale": "ja",
@@ -2669,7 +2669,7 @@ def _tv_widget_block(symbol: str, kind: str = "mini", color_theme: str = "light"
             "showMA": False,
             "hideDateRanges": True,
             "hideMarketStatus": True,
-            "hideSymbolLogo": False,
+            "hideSymbolLogo": True,
             "scalePosition": "right",
             "scaleMode": "Normal",
         }
@@ -2684,7 +2684,7 @@ def _tv_widget_block(symbol: str, kind: str = "mini", color_theme: str = "light"
             "colorTheme": color_theme,
             "isTransparent": True,
             "autosize": False,
-            "chartOnly": False,
+            "chartOnly": True,
             "trendLineColor": "rgba(41, 98, 255, 1)",
             "underLineColor": "rgba(41, 98, 255, 0.3)",
             "underLineBottomColor": "rgba(41, 98, 255, 0)",
