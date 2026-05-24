@@ -314,67 +314,56 @@ _Q_PATTERN = re.compile(
 
 def _extract_current_from_annotation(segment: str, low: float, high: float) -> Optional[float]:
     """
-    [改訂版・主要手法]
-    q() 引数の末尾には現在値・前日比などを含む注釈テキストが入っているが、
-    同時に「チャート軸ラベル(low/high/中間値)」もデータに含まれているので
-    単純に「レンジ内の最後の数字」を取ると軸ラベルを拾ってしまう (旧版バグ:
-    ダウ・NASでlow値そのものを返していた)。
+    [改訂2版・主要手法]
+    軸ラベル排除戦略を 完全刷新。
 
-    厳格化された戦略:
-      1) [low*0.97, high*1.08] 内の数値だけ候補にする
-      2) low/high と一致(±0.5)するものは除外 (軸の上下端ラベル)
-      3) 「丸い整数」(50/100/500/1000の倍数の整数値) も除外 (中間軸ラベル例:50500)
-      4) 残った候補のうち、「小数点ありの値」を最優先 (現在値は通常 50943.45 のように細かい)
-      5) どれも無ければ最初の候補を返す
-      6) 全部弾かれたら None を返し、呼び出し側はSVG抽出にフォールバック
+    観察:
+      - チャート軸ラベル (51081, 50500, 50382 等) はデータファイル中で
+        '51081.00' のように 小数部が全てゼロ で書かれている可能性が高い
+      - 現在値 (50943.45 のようなリアル価格) は 小数部が非ゼロ
+      - q() 引数の low/high と画面に表示される軸ラベル値は別の値が入っている
+
+    新戦略 (シンプルかつ確実):
+      1) セグメント内の "整数部.小数部" ペアを抽出
+      2) 小数部が 完全にゼロ ('00' '0' '000') のものは軸ラベル候補として除外
+      3) 残った候補のうち、価格レンジ [low*0.97, high*1.08] 内のものを採用
+      4) q() の low/high ぴったりとも一致しないもの
+      5) 最初に見つかった候補を返す
+      6) 一つも見つからなければ None (SVG抽出にフォールバック)
+
+    VIX等の小型銘柄 (high<100) はSVG座標と干渉するのでスキップ。
     """
     try:
         if high < 100:
-            # 小型銘柄(VIX等) は SVG座標と価格レンジが重なり誤検出するので
-            # この手法は使わない
             return None
 
         lo_th = low * 0.97
         hi_th = high * 1.08
 
-        def _is_axis_label(v: float) -> bool:
-            """軸ラベルらしいかを判定"""
-            # low/high ぴったり
-            if abs(v - low) < 0.5 or abs(v - high) < 0.5:
-                return True
-            # 整数で、かつ 50/100/500/1000 の倍数 (中間軸ラベルにありがち)
-            if v == int(v):
-                iv = int(v)
-                if iv % 500 == 0 or iv % 1000 == 0:
-                    return True
-                # 100の倍数 は範囲が広い銘柄(ダウ等)では軸ラベル候補が多い
-                if high > 1000 and iv % 100 == 0:
-                    return True
-            return False
-
-        nums = re.findall(r'\d+\.?\d*', segment)
-        candidates: List[float] = []
-        for n in nums:
+        # 「整数部.小数部」のペアで抽出。小数なし整数はマッチしない。
+        matches = re.findall(r'(\d+)\.(\d+)', segment)
+        for whole_part, decimal_part in matches:
+            # 小数部が全てゼロ ('00' '000' '0' 等) なら軸ラベル相当としてスキップ
             try:
-                v = float(n)
+                if int(decimal_part) == 0:
+                    continue
             except ValueError:
                 continue
+
+            try:
+                v = float(f"{whole_part}.{decimal_part}")
+            except ValueError:
+                continue
+
             if not (lo_th <= v <= hi_th):
                 continue
-            if _is_axis_label(v):
+            # 念のため q() の low/high ぴったりも除外
+            if abs(v - low) < 0.5 or abs(v - high) < 0.5:
                 continue
-            candidates.append(v)
 
-        if not candidates:
-            return None
+            return v   # 最初の有効候補
 
-        # 小数点ありの値があれば最優先 (現在値は通常 .XX 付き)
-        with_decimal = [v for v in candidates if v != int(v)]
-        if with_decimal:
-            return with_decimal[0]
-
-        # 全部整数なら最初の候補を返す
-        return candidates[0]
+        return None
     except Exception:
         return None
 
@@ -861,17 +850,33 @@ def render_synthetic_fx(data: Dict[str, Any]) -> None:
                 f'</div>'
             )
 
+        def _src_badge(source: Optional[str]) -> str:
+            """値の取得元を示す小バッジ (annotation/svg/midpoint で色分け)"""
+            if not source:
+                return ''
+            color, label = {
+                "annotation": ("#2e7d32", "ann"),   # 緑: 注釈から (最良)
+                "svg":        ("#ef6c00", "svg"),   # 橙: SVGパスから (近似)
+                "midpoint":   ("#c62828", "mid"),   # 赤: 中央値フォールバック (要注意)
+            }.get(source, ("#9e9e9e", source))
+            return (
+                f'<span style="background:{color};color:#fff;font-size:8px;'
+                f'padding:0 4px;border-radius:2px;font-weight:600;'
+                f'margin-left:4px;vertical-align:middle;">{label}</span>'
+            )
+
         # ── ① 土日ダウ
         if sekai and "dow" in sekai:
             lo = sekai["dow"]["low"]
             hi = sekai["dow"]["high"]
             # SVGから抽出した現在値があればそれを、なければレンジ中央値
             cur = sekai["dow"].get("current")
+            src = sekai["dow"].get("source")
             display_val = cur if cur is not None else (lo + hi) / 2
             chg_html = _chg_html(display_val, prev_closes.get("dow"))
             weekend_row += (
                 f'<div class="syn-card syn-weekend">'
-                f'<div class="syn-label">🇺🇸 土日ダウ</div>'
+                f'<div class="syn-label">🇺🇸 土日ダウ{_src_badge(src)}</div>'
                 f'<div class="syn-value">{display_val:,.2f}</div>'
                 f'{chg_html}'
                 f'</div>'
@@ -882,11 +887,12 @@ def render_synthetic_fx(data: Dict[str, Any]) -> None:
             lo = sekai["nas100"]["low"]
             hi = sekai["nas100"]["high"]
             cur = sekai["nas100"].get("current")
+            src = sekai["nas100"].get("source")
             display_val = cur if cur is not None else (lo + hi) / 2
             chg_html = _chg_html(display_val, prev_closes.get("nas100"))
             weekend_row += (
                 f'<div class="syn-card syn-weekend">'
-                f'<div class="syn-label">🇺🇸 土日NASDAQ100</div>'
+                f'<div class="syn-label">🇺🇸 土日NASDAQ100{_src_badge(src)}</div>'
                 f'<div class="syn-value">{display_val:,.2f}</div>'
                 f'{chg_html}'
                 f'</div>'
@@ -916,11 +922,12 @@ def render_synthetic_fx(data: Dict[str, Any]) -> None:
             lo = sekai["vix"]["low"]
             hi = sekai["vix"]["high"]
             cur = sekai["vix"].get("current")
+            src = sekai["vix"].get("source")
             display_val = cur if cur is not None else (lo + hi) / 2
             chg_html = _chg_html(display_val, prev_closes.get("vix"))
             weekend_row += (
                 f'<div class="syn-card syn-weekend">'
-                f'<div class="syn-label">😱 土日VIX</div>'
+                f'<div class="syn-label">😱 土日VIX{_src_badge(src)}</div>'
                 f'<div class="syn-value">{display_val:,.2f}</div>'
                 f'{chg_html}'
                 f'</div>'
