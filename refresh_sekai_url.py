@@ -91,14 +91,14 @@ def parse_indices_from_body_text(body_text: str):
 
     sekai-kabuka.com の表示は典型的に
         | 50,920 +340 | サンデーダウ CFD | +0.67 % | 29,481.64 +124.37 | NASDAQ100 ...
-    のように値がラベルの「前」または「後」に並ぶことが観察された。
-    パイプ「|」区切り or 改行区切り のどちらも対応する。
+    のように値がラベルの「前」または「後」に並ぶ。「|」と改行両方で区切られる。
 
-    返り値: { "oil": 90.53, "dow": 51085.50, ... } (取れたものだけ)
+    重要: 同じラベル名 (e.g. "NASDAQ100") が通常市場とサンデーで両方出る場合がある。
+    その場合は「最後の出現」を採用すれば、レイアウト的に後ろに来るサンデー側を取れる。
     """
     results = {}
 
-    # body_text を改行とパイプの両方で分割して、フラットなトークン列にする
+    # body_text を「|」と改行で分割してフラットなトークン列に
     tokens = []
     for raw_line in body_text.split("\n"):
         for piece in raw_line.split("|"):
@@ -106,55 +106,88 @@ def parse_indices_from_body_text(body_text: str):
             if piece:
                 tokens.append(piece)
 
-    for key, label_candidates in TARGET_INSTRUMENTS.items():
-        found_value = None
-        for label in label_candidates:
-            # ラベル含むトークンの index を全部探す
-            label_indices = [i for i, t in enumerate(tokens) if label in t]
-            if not label_indices:
-                continue
-            # 各ラベル位置の「前後」N トークンから数値を探す (前を優先、続けて後)
-            WINDOW = 4
-            for li in label_indices:
-                # 検査範囲: ラベルの前後 WINDOW 個 (前を先に試す)
-                positions_to_check = []
-                # 前を直近→離れる順
-                for offset in range(1, WINDOW + 1):
-                    positions_to_check.append(li - offset)
-                # 後を直近→離れる順
-                for offset in range(1, WINDOW + 1):
-                    positions_to_check.append(li + offset)
+    # 各銘柄について: 専用ラベル群と汎用ラベル群を持つ
+    # 専用ラベルが見つかれば最初の出現を、汎用ラベルだけなら最後の出現を採用
+    INSTRUMENT_LABELS = {
+        "dow": {
+            "specific": ["サンデーダウ", "サンデーDOW"],
+            "generic":  ["ダウ平均", "ダウ・ジョーンズ"],
+        },
+        "nas100": {
+            "specific": ["サンデーNASDAQ", "サンデーNAS"],
+            "generic":  ["NASDAQ100", "NASDAQ"],
+        },
+        "oil": {
+            "specific": ["サンデー原油", "サンデーWTI"],
+            "generic":  ["原油 CFD", "WTI原油"],
+        },
+        "gold": {
+            "specific": ["サンデーゴールド", "サンデー金"],
+            "generic":  ["ゴールド", "金先物"],
+        },
+        "vix": {
+            "specific": ["VIX 24時間比", "VIX24時間", "サンデーVIX"],
+            "generic":  ["VIX"],
+        },
+    }
 
-                for pos in positions_to_check:
-                    if not (0 <= pos < len(tokens)):
-                        continue
-                    candidate_token = tokens[pos]
-                    # トークン例: "50,920 +340" → 最初の数値が現在値、次が変化額
-                    # トークン内の数値を全部取り出す
-                    nums_in_token = re.findall(
-                        r'[+-]?[\d,]+\.?\d*', candidate_token
-                    )
-                    for num_str in nums_in_token:
-                        # %記号や日付っぽいパターンは除外
-                        if "%" in candidate_token and num_str in candidate_token.split("%")[0].split()[-1:]:
-                            continue
-                        raw_num = num_str.replace(",", "")
-                        try:
-                            val = float(raw_num)
-                        except ValueError:
-                            continue
-                        # 符号付き(変化額や%)は除外: +/- で始まるものは普通「変化」
-                        if num_str.startswith("+") or num_str.startswith("-"):
-                            continue
-                        if _is_plausible(key, val):
+    def _extract_number_near(label_pos: int, window: int = 4):
+        """ラベル位置の前後 window 個から数値を見つける (前を優先)"""
+        positions = []
+        for offset in range(1, window + 1):
+            positions.append(label_pos - offset)
+        for offset in range(1, window + 1):
+            positions.append(label_pos + offset)
+        for pos in positions:
+            if not (0 <= pos < len(tokens)):
+                continue
+            t = tokens[pos]
+            nums = re.findall(r'[+-]?[\d,]+\.?\d*', t)
+            for num_str in nums:
+                # 符号付き (変化額) は除外
+                if num_str.startswith("+") or num_str.startswith("-"):
+                    continue
+                try:
+                    val = float(num_str.replace(",", ""))
+                except ValueError:
+                    continue
+                return val, pos
+        return None, None
+
+    for key in TARGET_INSTRUMENTS.keys():
+        labels = INSTRUMENT_LABELS.get(key, {})
+        specific_labels = labels.get("specific", [])
+        generic_labels = labels.get("generic", [])
+
+        found_value = None
+
+        # ── (1) 専用ラベル: 最初の出現を採用
+        for label in specific_labels:
+            indices = [i for i, t in enumerate(tokens) if label in t]
+            if indices:
+                # 専用ラベルが見つかったら最初の出現の前後を探す
+                for li in indices:
+                    val, _ = _extract_number_near(li)
+                    if val is not None and _is_plausible(key, val):
+                        found_value = val
+                        break
+                if found_value is not None:
+                    break
+
+        # ── (2) 汎用ラベル: 「最後の出現」を採用 (サンデー版はレイアウト的に後ろ)
+        if found_value is None:
+            for label in generic_labels:
+                indices = [i for i, t in enumerate(tokens) if label in t]
+                if indices:
+                    # 後ろから順に試す
+                    for li in reversed(indices):
+                        val, _ = _extract_number_near(li)
+                        if val is not None and _is_plausible(key, val):
                             found_value = val
                             break
                     if found_value is not None:
                         break
-                if found_value is not None:
-                    break
-            if found_value is not None:
-                break
+
         if found_value is not None:
             results[key] = found_value
     return results
