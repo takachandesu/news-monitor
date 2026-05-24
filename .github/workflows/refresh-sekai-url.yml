@@ -1,7 +1,7 @@
 name: Refresh sekai-kabuka URL
 on:
   schedule:
-    - cron: '*/30 * * * *'   # 30分おき
+    - cron: '15,45 * * * *'   # 毎時 :15, :45 (post-to-x.ymlの :05,:35 とずらして重複回避)
   workflow_dispatch:         # 手動実行も可能
 
 permissions:
