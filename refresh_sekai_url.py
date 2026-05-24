@@ -130,6 +130,7 @@ def parse_indices_from_body_text(body_text: str):
         },
         "vix": {
             "specific": [
+                "恐怖指数 24時間比", "恐怖指数 24時間",     # ★ 本家の実際のラベル
                 "VIX 24時間比", "VIX24時間比", "VIX 24時間", "VIX24時間",
                 "24時間VIX", "サンデーVIX", "VIX (24h)", "VIX(24h)",
                 "恐怖指数 24h", "VIX 24h"
@@ -138,8 +139,9 @@ def parse_indices_from_body_text(body_text: str):
         },
     }
 
-    def _extract_number_near(label_pos: int, window: int = 4):
-        """ラベル位置の前後 window 個から数値を見つける (前を優先)"""
+    def _extract_number_near(label_pos: int, key: str, window: int = 4):
+        """ラベル位置の前後 window 個から、その銘柄レンジに合う数値を見つける (前を優先)。
+        無関係な銘柄の値 (e.g., 原油の隣にプラチナがある等) はスキップする。"""
         positions = []
         for offset in range(1, window + 1):
             positions.append(label_pos - offset)
@@ -158,7 +160,9 @@ def parse_indices_from_body_text(body_text: str):
                     val = float(num_str.replace(",", ""))
                 except ValueError:
                     continue
-                return val, pos
+                # ★ ここで銘柄レンジチェック (これがないと隣のプラチナ値等を拾う)
+                if _is_plausible(key, val):
+                    return val, pos
         return None, None
 
     for key in TARGET_INSTRUMENTS.keys():
@@ -172,10 +176,9 @@ def parse_indices_from_body_text(body_text: str):
         for label in specific_labels:
             indices = [i for i, t in enumerate(tokens) if label in t]
             if indices:
-                # 専用ラベルが見つかったら最初の出現の前後を探す
                 for li in indices:
-                    val, _ = _extract_number_near(li)
-                    if val is not None and _is_plausible(key, val):
+                    val, _ = _extract_number_near(li, key)
+                    if val is not None:
                         found_value = val
                         break
                 if found_value is not None:
@@ -186,10 +189,9 @@ def parse_indices_from_body_text(body_text: str):
             for label in generic_labels:
                 indices = [i for i, t in enumerate(tokens) if label in t]
                 if indices:
-                    # 後ろから順に試す
                     for li in reversed(indices):
-                        val, _ = _extract_number_near(li)
-                        if val is not None and _is_plausible(key, val):
+                        val, _ = _extract_number_near(li, key)
+                        if val is not None:
                             found_value = val
                             break
                     if found_value is not None:
