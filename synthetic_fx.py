@@ -449,15 +449,6 @@ def _parse_sekai_q_calls(text: str) -> Dict[str, Dict[str, float]]:
             entry["current"] = chosen["current"]
         out[name] = entry
 
-    # デバッグ情報: 全候補を __debug__ キーに含めて返す (renderで確認用)
-    debug_info = {}
-    for name, cands in candidates.items():
-        debug_info[name] = [
-            f"lo={c['low']:.2f} hi={c['high']:.2f} ofs={c['offset']} cur={c.get('current')}"
-            for c in cands
-        ]
-    out["__debug__"] = debug_info  # type: ignore
-
     return out
 
 
@@ -781,43 +772,9 @@ def render_synthetic_fx(data: Dict[str, Any]) -> None:
     recalc = data.get("recalc") or {}
     synth = data.get("synth_usdjpy")
     sekai = data.get("sekai") or {}
-    # デバッグ情報を取り出して別管理（sekaiから外す）
-    _sekai_debug = sekai.pop("__debug__", None) if isinstance(sekai, dict) else None
-    dom_count = data.get("dom_count", 0)
-    if _sekai_debug is not None or dom_count is not None:
-        try:
-            lines = [f"DOM scrape: {dom_count} 銘柄取得済み (sekai_indices.json)"]
-            # 各銘柄の最終値
-            for name in ("dow", "nas100", "oil", "vix"):
-                if name in sekai:
-                    info = sekai[name]
-                    cur = info.get("current")
-                    lo = info.get("low")
-                    hi = info.get("high")
-                    cur_s = f"{cur:.2f}" if cur is not None else "None"
-                    lo_s = f"{lo:.2f}" if lo is not None else "None"
-                    hi_s = f"{hi:.2f}" if hi is not None else "None"
-                    lines.append(f"<b>{name}</b>: cur={cur_s} (low={lo_s} high={hi_s})")
-            # q() 候補も追加表示
-            if _sekai_debug:
-                lines.append("--- q() 候補一覧 ---")
-                for name, cands_list in _sekai_debug.items():
-                    lines.append(f"<b>{name}</b> ({len(cands_list)}件):")
-                    for j, c in enumerate(cands_list):
-                        marker = " ★採用" if j == (1 if len(cands_list) >= 2 else 0) else ""
-                        lines.append(f"&nbsp;&nbsp;[{j}] {c}{marker}")
-            dbg_html = "<br/>".join(lines)
-            st.markdown(
-                f'<div style="background:#fff3cd;border:2px solid #f5b400;'
-                f'padding:8px;margin:4px 0;font-family:monospace;font-size:11px;'
-                f'color:#5a4500;border-radius:6px;">'
-                f'<b>🔧 sekai-kabuka 取得状況 (一時デバッグ)</b><br/>'
-                f'{dbg_html}'
-                f'</div>',
-                unsafe_allow_html=True
-            )
-        except Exception:
-            pass
+    # __debug__ キーが残っていれば取り除く（renderには出さない）
+    if isinstance(sekai, dict):
+        sekai.pop("__debug__", None)
     sekai_error = data.get("sekai_error")
     now_jst = data.get("now_jst", "")
 
