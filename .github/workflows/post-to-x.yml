@@ -1,33 +1,54 @@
 name: Post breaking news to X
-
 on:
   schedule:
-    - cron: '2,17,32,47 * * * *'   # 毎時 :02, :17, :32, :47（news取得の1分後）
-  workflow_dispatch:             # 手動実行も可能
-
+    - cron: '5,35 * * * *'         # 毎時 :05, :35（30分おき）
+  workflow_dispatch:               # 手動実行も可能
 permissions:
-  contents: write                # state.json を commit するため
-
+  contents: write                  # state.json と sekai_data_url.txt を commit するため
 concurrency:
   group: post-to-x
-  cancel-in-progress: false      # 多重起動防止（前のジョブが終わるまで新しいのを待たせる）
-
+  cancel-in-progress: false
 jobs:
   post:
     runs-on: ubuntu-latest
-    timeout-minutes: 8           # 万一スクリプトが詰まった時の保険
-
+    timeout-minutes: 10            # sekai URL更新も含むので少し長めに
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
           cache: pip
 
-      - name: Install dependencies
+      # ────────────────────────────────────
+      # ① sekai-kabuka URL の自動更新 (Playwright)
+      # ────────────────────────────────────
+      - name: Cache Playwright browsers
+        id: playwright-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-chromium-${{ runner.os }}-v1
+
+      - name: Install Playwright
+        run: |
+          pip install --quiet playwright
+          # キャッシュにブラウザが入っているか軽くチェック
+          if ls "$HOME/.cache/ms-playwright/" 2>/dev/null | grep -q chromium; then
+            playwright install-deps chromium || true
+          else
+            playwright install --with-deps chromium
+          fi
+
+      - name: Refresh sekai-kabuka URL
+        run: python refresh_sekai_url.py || echo "[warn] sekai URL refresh failed (continuing)"
+        continue-on-error: true
+
+      # ────────────────────────────────────
+      # ② X 投稿スクリプト本体
+      # ────────────────────────────────────
+      - name: Install posting dependencies
         run: pip install --quiet requests tweepy anthropic
 
       - name: Run posting script
@@ -40,15 +61,18 @@ jobs:
           X_ACCESS_SECRET:   ${{ secrets.X_ACCESS_SECRET }}
         run: python post_to_x.py
 
-      - name: Commit state if changed
+      # ────────────────────────────────────
+      # ③ 変更があれば commit & push
+      # ────────────────────────────────────
+      - name: Commit state changes if any
         if: always()
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add posted_state.json
+          git add posted_state.json sekai_data_url.txt 2>/dev/null || true
           if git diff --cached --quiet; then
-            echo "No state changes to commit."
+            echo "No changes to commit."
           else
-            git commit -m "Update posted state [skip ci]"
+            git commit -m "Update posted_state and/or sekai URL [skip ci]"
             git push
           fi
