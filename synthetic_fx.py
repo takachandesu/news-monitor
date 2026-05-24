@@ -198,48 +198,59 @@ def _compute_synth_usdjpy() -> Optional[Dict[str, Any]]:
 # =====================================================
 # (2) sekai-kabuka.com  =  土日ダウ / NASDAQ100 / VIX
 # =====================================================
-def _discover_sekai_data_url() -> Optional[str]:
+def _discover_sekai_data_url() -> Tuple[Optional[str], str]:
     """
-    1) Streamlit Secrets の manual_url があればそれを使う (推奨運用)
-    2) HTMLを取得しURLを抽出（JS生成だと失敗する可能性が高い）
-    3) 前回成功URLをフォールバック
+    sekai-kabuka.com の最新データURLを取得する。
+    優先順位:
+      1) HTML抽出 (一番フレッシュ。ページの<script>から毎回新しいハッシュ付きURLを取り出す)
+      2) Streamlit Secrets の手動URL (フォールバック・固定スナップショット)
+      3) 直前回成功時のURL (キャッシュ)
+    返り値: (URL, "html"/"manual"/"cache"/"none" のラベル)
     """
     global _LAST_SEKAI_DATA_URL
 
-    # 1) 手動上書き (推奨)
+    # ── 1) HTML を取得して正規表現抽出 (最優先)
+    try:
+        r = _safe_get(SEKAI_HOME_URL, headers={
+            "Accept": "text/html,application/xhtml+xml",
+            "Accept-Language": "ja,en-US;q=0.9",
+            "Accept-Encoding": "gzip, deflate, br",
+            "Referer": "https://sekai-kabuka.com/",
+            "Cache-Control": "no-cache",
+            "Pragma": "no-cache",
+        }, timeout=10)
+        if r is not None:
+            for enc in ("ascii", "utf-8", "shift_jis"):
+                try:
+                    text = r.content.decode(enc, errors="ignore")
+                except Exception:
+                    continue
+                m = SEKAI_DATA_URL_PATTERN.search(text)
+                if m:
+                    url = m.group(0)
+                    if url.startswith("//"):
+                        url = "https:" + url
+                    _LAST_SEKAI_DATA_URL = url
+                    return url, "html"
+    except Exception:
+        pass
+
+    # ── 2) Streamlit Secrets の手動URL (フォールバック)
     try:
         manual = st.secrets.get("sekai_kabuka", {}).get("manual_url", "")
         if manual and isinstance(manual, str) and manual.strip():
             url = manual.strip()
             if url.startswith("//"):
                 url = "https:" + url
-            return url
+            return url, "manual"
     except Exception:
         pass
 
-    # 2) HTML を取得して正規表現抽出 (複数エンコーディングで試す)
-    r = _safe_get(SEKAI_HOME_URL, headers={
-        "Accept": "text/html,application/xhtml+xml",
-        "Accept-Language": "ja,en-US;q=0.9",
-        "Accept-Encoding": "gzip, deflate, br",
-        "Referer": "https://sekai-kabuka.com/",
-    }, timeout=10)
-    if r is not None:
-        for enc in ("ascii", "utf-8", "shift_jis"):
-            try:
-                text = r.content.decode(enc, errors="ignore")
-            except Exception:
-                continue
-            m = SEKAI_DATA_URL_PATTERN.search(text)
-            if m:
-                url = m.group(0)
-                if url.startswith("//"):
-                    url = "https:" + url
-                _LAST_SEKAI_DATA_URL = url
-                return url
+    # ── 3) 前回成功URL (最終フォールバック)
+    if _LAST_SEKAI_DATA_URL:
+        return _LAST_SEKAI_DATA_URL, "cache"
 
-    # 3) 前回成功URL
-    return _LAST_SEKAI_DATA_URL
+    return None, "none"
 
 
 # q( count, low, high, offset, samples, 'svg文字列' ) を抽出する正規表現
@@ -287,11 +298,16 @@ def _parse_sekai_q_calls(text: str) -> Dict[str, Dict[str, float]]:
 
 
 def _fetch_sekai_indices() -> Dict[str, Any]:
-    """sekai-kabuka.com からダウ/NAS100/VIX を取得。常にdictを返し、失敗時は status に理由を入れる"""
-    url = _discover_sekai_data_url()
+    """sekai-kabuka.com からダウ/NAS100/VIX を取得。常にdictを返し、失敗時は error に理由を入れる"""
+    url, url_source = _discover_sekai_data_url()
     if not url:
-        return {"data": {}, "error": "URL抽出失敗(HTML/Secrets共に取れず)", "url": None}
-    r = _safe_get(url, headers={
+        return {"data": {}, "error": "URL抽出失敗(HTML/Secrets共に取れず)", "url": None, "url_source": "none"}
+
+    # キャッシュバスターを付与 (CDNキャッシュ回避)
+    sep = "&" if "?" in url else "?"
+    url_with_bust = f"{url}{sep}_={int(time.time())}"
+
+    r = _safe_get(url_with_bust, headers={
         "Accept": "*/*",
         "Accept-Language": "ja,en-US;q=0.9",
         "Accept-Encoding": "gzip, deflate, br",
@@ -299,9 +315,11 @@ def _fetch_sekai_indices() -> Dict[str, Any]:
         "Sec-Fetch-Dest": "script",
         "Sec-Fetch-Mode": "no-cors",
         "Sec-Fetch-Site": "same-site",
+        "Cache-Control": "no-cache",
+        "Pragma": "no-cache",
     }, timeout=10)
     if not r:
-        return {"data": {}, "error": "データURLへのGETが失敗", "url": url}
+        return {"data": {}, "error": "データURLへのGETが失敗", "url": url, "url_source": url_source}
     # requestsは Content-Encoding: gzip を自動展開する
     try:
         text = r.content.decode("shift_jis", errors="ignore")
@@ -310,8 +328,8 @@ def _fetch_sekai_indices() -> Dict[str, Any]:
 
     parsed = _parse_sekai_q_calls(text)
     if not parsed:
-        return {"data": {}, "error": "q()パターンが見つからず", "url": url}
-    return {"data": parsed, "error": None, "url": url}
+        return {"data": {}, "error": "q()パターンが見つからず", "url": url, "url_source": url_source}
+    return {"data": parsed, "error": None, "url": url, "url_source": url_source}
 
 
 # =====================================================
@@ -533,6 +551,7 @@ def fetch_synthetic_fx() -> Dict[str, Any]:
             "sekai": sekai_result.get("data", {}),
             "sekai_error": sekai_result.get("error"),
             "sekai_url": sekai_result.get("url"),
+            "sekai_url_source": sekai_result.get("url_source", "n/a"),
             "recalc": recalc,
             "prev_closes": prev_closes,
             "as_of": nowjst.strftime("%H:%M:%S JST"),
@@ -707,9 +726,31 @@ def render_synthetic_fx(data: Dict[str, Any]) -> None:
     # ================================================
     # 出力
     # ================================================
+    sekai_url_source = data.get("sekai_url_source", "n/a")
+    # データソースのバッジ (色分けで状態が一目で分かる)
+    src_color = {
+        "html":   "#2e7d32",  # 緑: 最新URL取得成功
+        "manual": "#ef6c00",  # オレンジ: 手動URL使用中(古いかも)
+        "cache":  "#c62828",  # 赤: 前回URL再利用(かなり古い可能性)
+        "none":   "#9e9e9e",  # グレー: 未取得
+        "n/a":    "#9e9e9e",
+    }.get(sekai_url_source, "#9e9e9e")
+    src_label = {
+        "html":   "最新",
+        "manual": "手動URL",
+        "cache":  "古い",
+        "none":   "未取得",
+        "n/a":    "",
+    }.get(sekai_url_source, sekai_url_source)
+    badge = (
+        f'<span style="background:{src_color};color:#fff;font-size:9px;'
+        f'padding:1px 6px;border-radius:3px;margin-left:6px;font-weight:600;">'
+        f'{src_label}</span>'
+    ) if src_label else ""
+
     weekend_html = (
         f'<div class="syn-wrap syn-weekend-wrap">'
-        f'<div class="syn-weekend-title">📅 土日モード ({now_jst})</div>'
+        f'<div class="syn-weekend-title">📅 土日モード ({now_jst}){badge}</div>'
         f'<div class="syn-weekend-subtitle">土日に動く為替と株価指数です。参考値です。</div>'
         f'<div class="syn-wrap" style="margin:0;">{weekend_row}</div>'
         f'</div>'
