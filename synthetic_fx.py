@@ -292,6 +292,74 @@ _Q_PATTERN = re.compile(
 )
 
 
+def _extract_current_from_svg(svg_text: str, low: float, high: float) -> Optional[float]:
+    """
+    SVGパス文字列から「最後の点のY座標」を取り出して現在値を逆算する。
+
+    入力: q() 関数の引数部分の後ろにあるSVG文字列断片 (エンコーディングは壊れていてOK)
+    アルゴリズム:
+      1) 'M' (Move-to) を探す。なければ None
+      2) 'M' の後ろから 'H'/'V'/'Z'/'L' などの次のSVGコマンドまでの範囲を抽出
+      3) その範囲内の全数値を抽出 (区切り文字は何でも良い)
+      4) 数値は x,y のペアとみなし、奇数番目(y) を集める
+      5) y_min ↔ high, y_max ↔ low と対応させ、最後の y から現在値を線形補間で算出
+      6) SVGはy軸が下向きなので、y_min(画面上部)=high、y_max(画面下部)=low となる
+
+    失敗時は None を返す。呼び出し側はレンジ中央値にフォールバックする。
+    """
+    try:
+        m_pos = svg_text.find('M')
+        if m_pos < 0:
+            return None
+
+        rest = svg_text[m_pos + 1:]
+
+        # 次のSVGパスコマンド(または引用符) までを切り取り
+        end = len(rest)
+        for ch in ('H', 'V', 'Z', 'L', 'C', 'S', 'Q', 'T', 'A',
+                   'h', 'v', 'z', 'l', 'c', 's', 'q', 't', 'a',
+                   '"', "'", ')'):
+            idx = rest.find(ch)
+            if 0 < idx < end:
+                end = idx
+        path_data = rest[:end]
+
+        # 区切り文字に依存せず、すべての浮動小数点数を抽出
+        nums = re.findall(r'\d+\.?\d*', path_data)
+        if len(nums) < 4:        # 最低でも 2点(x1,y1,x2,y2)
+            return None
+
+        try:
+            values = [float(n) for n in nums]
+        except ValueError:
+            return None
+
+        # 偶数番目=x, 奇数番目=y とみなす
+        # (SVGの M x1 y1 x2 y2 ... 形式)
+        ys = values[1::2]
+        if len(ys) < 2:
+            return None
+
+        last_y = ys[-1]
+        y_min = min(ys)
+        y_max = max(ys)
+        if y_max == y_min:
+            return None      # 値が縮退、安全策で中央値フォールバック
+
+        # 線形補間: y_min が画面上部(=high) / y_max が画面下部(=low)
+        # last_y が y_min に近いほど high に近い、y_max に近いほど low に近い
+        fraction = (last_y - y_min) / (y_max - y_min)   # 0.0〜1.0
+        current = high - fraction * (high - low)
+
+        # サニティチェック: 値域から大きく外れていたら採用しない
+        margin = (high - low) * 0.05
+        if not (low - margin <= current <= high + margin):
+            return None
+        return current
+    except Exception:
+        return None
+
+
 def _parse_sekai_q_calls(text: str) -> Dict[str, Dict[str, float]]:
     """
     q(count, low, high, offset, samples, 'svg...') の羅列を解析。
@@ -300,17 +368,14 @@ def _parse_sekai_q_calls(text: str) -> Dict[str, Dict[str, float]]:
       - 1番目 = 通常市場(金曜終値で固定)
       - 2番目 = サンデー24h CFD/参考値(リアルタイムで動く) ← ユーザーが見たいのはこっち
 
-    戦略:
-      ・銘柄ごとに値域マッチで候補を集める
-      ・同じ銘柄に複数候補があれば 2番目以降(サンデー版)を採用
-      ・候補が1つしかなければそれを採用
+    各エントリのSVGパス末尾を解析して 'current' 値を抽出。失敗時は None。
 
-    返り値: { "dow": {low, high}, "nas100": {...}, "vix": {...} }
+    返り値: { "dow": {low, high, current}, "nas100": {...}, "vix": {...} }
     """
-    # 銘柄ごとに、見つかった候補をすべて集める
     candidates: Dict[str, List[Dict[str, float]]] = {}
 
-    for m in _Q_PATTERN.finditer(text):
+    matches = list(_Q_PATTERN.finditer(text))
+    for i, m in enumerate(matches):
         try:
             low = float(m.group(2))
             high = float(m.group(3))
@@ -320,24 +385,35 @@ def _parse_sekai_q_calls(text: str) -> Dict[str, Dict[str, float]]:
         if not (low > 0 and high > 0 and high >= low):
             continue
 
+        # この q() 引数のあとから、次の q() 開始位置までを SVG 領域とみなす
+        svg_start = m.end()
+        if i + 1 < len(matches):
+            svg_end = matches[i + 1].start()
+        else:
+            svg_end = min(svg_start + 4000, len(text))
+        svg_segment = text[svg_start:svg_end]
+
+        # SVGパス末尾から現在値を逆算
+        current = _extract_current_from_svg(svg_segment, low, high)
+
         for name, lo, hi in _INSTRUMENT_RANGES:
             if lo <= low and high <= hi:
                 candidates.setdefault(name, []).append({
                     "low": low,
                     "high": high,
                     "offset": offset,
+                    "current": current,
                 })
                 break
 
     out: Dict[str, Dict[str, float]] = {}
     for name, cands in candidates.items():
-        if len(cands) >= 2:
-            # 候補が2つ以上 → 2番目(サンデー版/24h版)を採用
-            chosen = cands[1]
-        else:
-            # 候補1つだけ → それを使う
-            chosen = cands[0]
-        out[name] = {"low": chosen["low"], "high": chosen["high"]}
+        # 候補が2つ以上あれば2番目(サンデー版/24h版)を採用
+        chosen = cands[1] if len(cands) >= 2 else cands[0]
+        entry = {"low": chosen["low"], "high": chosen["high"]}
+        if chosen.get("current") is not None:
+            entry["current"] = chosen["current"]
+        out[name] = entry
 
     return out
 
@@ -692,12 +768,14 @@ def render_synthetic_fx(data: Dict[str, Any]) -> None:
         if sekai and "dow" in sekai:
             lo = sekai["dow"]["low"]
             hi = sekai["dow"]["high"]
-            mid = (lo + hi) / 2
-            chg_html = _chg_html(mid, prev_closes.get("dow"))
+            # SVGから抽出した現在値があればそれを、なければレンジ中央値
+            cur = sekai["dow"].get("current")
+            display_val = cur if cur is not None else (lo + hi) / 2
+            chg_html = _chg_html(display_val, prev_closes.get("dow"))
             weekend_row += (
                 f'<div class="syn-card syn-weekend">'
                 f'<div class="syn-label">🇺🇸 土日ダウ</div>'
-                f'<div class="syn-value">{mid:,.2f}</div>'
+                f'<div class="syn-value">{display_val:,.2f}</div>'
                 f'{chg_html}'
                 f'</div>'
             )
@@ -706,12 +784,13 @@ def render_synthetic_fx(data: Dict[str, Any]) -> None:
         if sekai and "nas100" in sekai:
             lo = sekai["nas100"]["low"]
             hi = sekai["nas100"]["high"]
-            mid = (lo + hi) / 2
-            chg_html = _chg_html(mid, prev_closes.get("nas100"))
+            cur = sekai["nas100"].get("current")
+            display_val = cur if cur is not None else (lo + hi) / 2
+            chg_html = _chg_html(display_val, prev_closes.get("nas100"))
             weekend_row += (
                 f'<div class="syn-card syn-weekend">'
                 f'<div class="syn-label">🇺🇸 土日NASDAQ100</div>'
-                f'<div class="syn-value">{mid:,.2f}</div>'
+                f'<div class="syn-value">{display_val:,.2f}</div>'
                 f'{chg_html}'
                 f'</div>'
             )
@@ -739,12 +818,13 @@ def render_synthetic_fx(data: Dict[str, Any]) -> None:
         if sekai and "vix" in sekai:
             lo = sekai["vix"]["low"]
             hi = sekai["vix"]["high"]
-            mid = (lo + hi) / 2
-            chg_html = _chg_html(mid, prev_closes.get("vix"))
+            cur = sekai["vix"].get("current")
+            display_val = cur if cur is not None else (lo + hi) / 2
+            chg_html = _chg_html(display_val, prev_closes.get("vix"))
             weekend_row += (
                 f'<div class="syn-card syn-weekend">'
                 f'<div class="syn-label">😱 土日VIX</div>'
-                f'<div class="syn-value">{mid:,.2f}</div>'
+                f'<div class="syn-value">{display_val:,.2f}</div>'
                 f'{chg_html}'
                 f'</div>'
             )
