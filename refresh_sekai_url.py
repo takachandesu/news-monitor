@@ -90,46 +90,69 @@ def parse_indices_from_body_text(body_text: str):
     ページ全体のinnerText (body_text) から、各銘柄の現在値を抽出する。
 
     sekai-kabuka.com の表示は典型的に
-        サンデー原油 CFD
-        90.53
-        -8.06%
-    のように label の直後に値が来る縦並びになっている前提。
+        | 50,920 +340 | サンデーダウ CFD | +0.67 % | 29,481.64 +124.37 | NASDAQ100 ...
+    のように値がラベルの「前」または「後」に並ぶことが観察された。
+    パイプ「|」区切り or 改行区切り のどちらも対応する。
 
     返り値: { "oil": 90.53, "dow": 51085.50, ... } (取れたものだけ)
     """
     results = {}
-    lines = [ln.strip() for ln in body_text.split("\n") if ln.strip()]
+
+    # body_text を改行とパイプの両方で分割して、フラットなトークン列にする
+    tokens = []
+    for raw_line in body_text.split("\n"):
+        for piece in raw_line.split("|"):
+            piece = piece.strip()
+            if piece:
+                tokens.append(piece)
 
     for key, label_candidates in TARGET_INSTRUMENTS.items():
         found_value = None
         for label in label_candidates:
-            # ラベルが含まれる行を探す (完全一致でなく部分一致でOK)
-            for i, line in enumerate(lines):
-                if label in line:
-                    # 直後の数行から最初の「数値らしい行」を探す
-                    for j in range(i + 1, min(i + 8, len(lines))):
-                        candidate_line = lines[j]
-                        # 純粋な数値 ('51,085.50', '90.53', '+0.5%' などを想定)
-                        # 「,」「.」を含む数字部分を抜き出して float に
-                        m = re.match(
-                            r'^\s*([+-]?[\d,]+\.?\d*)\s*$',
-                            candidate_line
-                        )
-                        if m:
-                            raw_num = m.group(1).replace(",", "")
-                            try:
-                                val = float(raw_num)
-                            except ValueError:
-                                continue
-                            # 「%」記号を含むものや極端な値はスキップ
-                            if "%" in candidate_line:
-                                continue
-                            # 数値の妥当性チェック (それぞれの銘柄の典型レンジ)
-                            if _is_plausible(key, val):
-                                found_value = val
-                                break
+            # ラベル含むトークンの index を全部探す
+            label_indices = [i for i, t in enumerate(tokens) if label in t]
+            if not label_indices:
+                continue
+            # 各ラベル位置の「前後」N トークンから数値を探す (前を優先、続けて後)
+            WINDOW = 4
+            for li in label_indices:
+                # 検査範囲: ラベルの前後 WINDOW 個 (前を先に試す)
+                positions_to_check = []
+                # 前を直近→離れる順
+                for offset in range(1, WINDOW + 1):
+                    positions_to_check.append(li - offset)
+                # 後を直近→離れる順
+                for offset in range(1, WINDOW + 1):
+                    positions_to_check.append(li + offset)
+
+                for pos in positions_to_check:
+                    if not (0 <= pos < len(tokens)):
+                        continue
+                    candidate_token = tokens[pos]
+                    # トークン例: "50,920 +340" → 最初の数値が現在値、次が変化額
+                    # トークン内の数値を全部取り出す
+                    nums_in_token = re.findall(
+                        r'[+-]?[\d,]+\.?\d*', candidate_token
+                    )
+                    for num_str in nums_in_token:
+                        # %記号や日付っぽいパターンは除外
+                        if "%" in candidate_token and num_str in candidate_token.split("%")[0].split()[-1:]:
+                            continue
+                        raw_num = num_str.replace(",", "")
+                        try:
+                            val = float(raw_num)
+                        except ValueError:
+                            continue
+                        # 符号付き(変化額や%)は除外: +/- で始まるものは普通「変化」
+                        if num_str.startswith("+") or num_str.startswith("-"):
+                            continue
+                        if _is_plausible(key, val):
+                            found_value = val
+                            break
                     if found_value is not None:
                         break
+                if found_value is not None:
+                    break
             if found_value is not None:
                 break
         if found_value is not None:
