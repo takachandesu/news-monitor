@@ -635,4 +635,22 @@ def main() -> int:
                     break
 
     # ── 最終的に state を保存
-    state["posted_ids"] = list(poste
+    state["posted_ids"] = list(posted_ids)
+    save_state(state)
+
+    final_today = state.get("daily_counts", {}).get(today, 0)
+    final_month = state.get("monthly_counts", {}).get(this_month, 0)
+    final_url   = state.get("url_post_counts", {}).get(this_month, 0)
+    final_cost  = _calc_actual_monthly_cost(state)
+    log(
+        f"[INFO] 終了 / 今回投稿: {posts_this_run}件 "
+        f"/ 本日累計 {final_today}/{MAX_POSTS_PER_DAY}件 "
+        f"/ 今月累計 {final_month}/{MAX_POSTS_PER_MONTH}件 "
+        f"(URL付き{final_url}件) "
+        f"/ 実コスト ${final_cost:.3f}/${MONTHLY_BUDGET_USD:.2f}"
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
