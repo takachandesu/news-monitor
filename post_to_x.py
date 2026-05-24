@@ -44,11 +44,11 @@ import anthropic
 # ═══════════════════════════════════════════════════════
 
 MAX_POSTS_PER_RUN   = 1       # 1回の実行で投稿する最大件数
-MAX_POSTS_PER_DAY   = 2       # 1日あたりの投稿上限（実質1.5件/日想定）
-MAX_POSTS_PER_MONTH = 25      # 1か月あたりの投稿上限
-                              # ※ URL頻度を下げた今、$5予算なら最大147件まで可能。
-                              #    投稿件数を増やしたい場合はここを上げる。
-MIN_INTERVAL_SEC    = 3600    # 投稿と投稿の最小間隔(秒) = 60分
+MAX_POSTS_PER_DAY   = 5       # 1日あたりの投稿上限
+MAX_POSTS_PER_MONTH = 140     # 1か月あたりの投稿上限
+                              # ※ URL頻度1/10で 140件 × $0.0335 ≒ $4.69/月
+                              #    月予算$5の範囲内
+MIN_INTERVAL_SEC    = 900     # 投稿と投稿の最小間隔(秒) = 15分（cron間隔と一致）
 
 POSTING_HOUR_START_JST = 6    # 投稿OK開始時刻（JST、0-23の整数）
 POSTING_HOUR_END_JST   = 23   # 投稿OK終了時刻（JST、これ未満ならOK）
