@@ -24,7 +24,7 @@ import streamlit as st
 # =====================================================
 # 設定
 # =====================================================
-_CACHE_TTL_SEC = 60                     # ユーザー指定: 60秒キャッシュ
+_CACHE_TTL_SEC = 30                     # 60→30秒に短縮 (土日株価指数の更新感を改善)
 JST = timezone(timedelta(hours=9))      # 日本時間
 
 _UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -202,26 +202,44 @@ def _compute_synth_usdjpy() -> Optional[Dict[str, Any]]:
 SEKAI_LOCAL_URL_FILE = "sekai_data_url.txt"  # GitHub Actions が更新する自動URLファイル
 
 
-def _read_url_from_local_file() -> Optional[str]:
+def _read_url_from_local_file() -> Tuple[Optional[str], Optional[str]]:
     """
     GitHub Actions の Playwright ワーカーが書き出した sekai_data_url.txt から
-    最新URLを読み取る。リポジトリのトップに置かれている前提。
+    最新URLと更新時刻を読み取る。
+
+    返り値: (URL, updated_at文字列)  updated_at は「# updated_at: ...」コメント行から抽出。
+    どちらも取れなければ None。
     """
+    url: Optional[str] = None
+    updated_at: Optional[str] = None
     try:
         if not os.path.exists(SEKAI_LOCAL_URL_FILE):
-            return None
+            return None, None
         with open(SEKAI_LOCAL_URL_FILE, "r", encoding="utf-8") as f:
             for line in f:
                 s = line.strip()
-                if not s or s.startswith("#"):
+                if not s:
                     continue
-                if s.startswith("http"):
-                    return s
-                if s.startswith("//"):
-                    return "https:" + s
-        return None
+                if s.startswith("#"):
+                    # # updated_at: 2026-05-24 08:07:29 UTC のようなコメントを拾う
+                    if "updated_at" in s:
+                        # ':' 以降を取って前後空白を削る
+                        idx = s.find(":")
+                        if idx >= 0:
+                            updated_at = s[idx + 1:].strip()
+                    continue
+                if url is None:
+                    if s.startswith("http"):
+                        url = s
+                    elif s.startswith("//"):
+                        url = "https:" + s
+        return url, updated_at
     except Exception:
-        return None
+        return None, None
+
+
+# updated_at は前回ファイル読み取り時の値をキャッシュ (描画にも使うため)
+_LAST_SEKAI_UPDATED_AT: Optional[str] = None
 
 
 def _discover_sekai_data_url() -> Tuple[Optional[str], str]:
@@ -234,10 +252,12 @@ def _discover_sekai_data_url() -> Tuple[Optional[str], str]:
       4) 直前回成功時のURL (キャッシュ)
     返り値: (URL, "auto"/"html"/"manual"/"cache"/"none" のラベル)
     """
-    global _LAST_SEKAI_DATA_URL
+    global _LAST_SEKAI_DATA_URL, _LAST_SEKAI_UPDATED_AT
 
     # ── 1) リポジトリ内の自動更新ファイル (最優先・最も新鮮)
-    auto_url = _read_url_from_local_file()
+    auto_url, auto_updated_at = _read_url_from_local_file()
+    if auto_updated_at:
+        _LAST_SEKAI_UPDATED_AT = auto_updated_at
     if auto_url:
         _LAST_SEKAI_DATA_URL = auto_url
         return auto_url, "auto"
@@ -292,75 +312,121 @@ _Q_PATTERN = re.compile(
 )
 
 
-def _extract_current_from_svg(svg_text: str, low: float, high: float) -> Optional[float]:
+def _extract_current_from_annotation(segment: str, low: float, high: float) -> Optional[float]:
     """
-    SVGパス文字列から「最後の点のY座標」を取り出して現在値を逆算する。
+    [新規・主要手法]
+    q() 引数の末尾には現在値・前日比などを含む注釈テキスト(引数7番目以降)が
+    入っていることが観察されている (引き継ぎ書 6-2 B案: 'コウイ-557й699.5' 等)。
+    SVG座標は通常 0〜1000 程度の小さな値なので、銘柄の価格レンジ近傍の数字を
+    拾えば「ほぼ確実に現在値マーカー」になる。
 
-    入力: q() 関数の引数部分の後ろにあるSVG文字列断片 (エンコーディングは壊れていてOK)
-    アルゴリズム:
-      1) 'M' (Move-to) を探す。なければ None
-      2) 'M' の後ろから 'H'/'V'/'Z'/'L' などの次のSVGコマンドまでの範囲を抽出
-      3) その範囲内の全数値を抽出 (区切り文字は何でも良い)
-      4) 数値は x,y のペアとみなし、奇数番目(y) を集める
-      5) y_min ↔ high, y_max ↔ low と対応させ、最後の y から現在値を線形補間で算出
-      6) SVGはy軸が下向きなので、y_min(画面上部)=high、y_max(画面下部)=low となる
+    戦略: セグメント内のすべての浮動小数点数のうち、[low*0.97, high*1.08] に
+    入るものを集め、その「最後」を採用する (テキストの後方ほど新鮮な可能性が高い)。
 
-    失敗時は None を返す。呼び出し側はレンジ中央値にフォールバックする。
+    レンジを上に少し広めに取るのは、リアルタイム値が日中レンジの high を
+    超えて動くことを許容するため (引き継ぎ書のダウ・NAS で観測された現象)。
+    下も少し狭く(0.97)取るのは、SVG座標 ≒ low に誤マッチするのを避けるため。
     """
     try:
-        m_pos = svg_text.find('M')
-        if m_pos < 0:
+        # high が小さい銘柄(VIX等) ではこの手法は信頼度が低い: 一桁の数値が大量に
+        # 含まれるSVG座標と price レンジが重なってしまい誤検出するため
+        if high < 100:
             return None
 
-        rest = svg_text[m_pos + 1:]
-
-        # 次のSVGパスコマンド(または引用符) までを切り取り
-        end = len(rest)
-        for ch in ('H', 'V', 'Z', 'L', 'C', 'S', 'Q', 'T', 'A',
-                   'h', 'v', 'z', 'l', 'c', 's', 'q', 't', 'a',
-                   '"', "'", ')'):
-            idx = rest.find(ch)
-            if 0 < idx < end:
-                end = idx
-        path_data = rest[:end]
-
-        # 区切り文字に依存せず、すべての浮動小数点数を抽出
-        nums = re.findall(r'\d+\.?\d*', path_data)
-        if len(nums) < 4:        # 最低でも 2点(x1,y1,x2,y2)
-            return None
-
-        try:
-            values = [float(n) for n in nums]
-        except ValueError:
-            return None
-
-        # 偶数番目=x, 奇数番目=y とみなす
-        # (SVGの M x1 y1 x2 y2 ... 形式)
-        ys = values[1::2]
-        if len(ys) < 2:
-            return None
-
-        last_y = ys[-1]
-        y_min = min(ys)
-        y_max = max(ys)
-        if y_max == y_min:
-            return None      # 値が縮退、安全策で中央値フォールバック
-
-        # 線形補間: y_min が画面上部(=high) / y_max が画面下部(=low)
-        # last_y が y_min に近いほど high に近い、y_max に近いほど low に近い
-        fraction = (last_y - y_min) / (y_max - y_min)   # 0.0〜1.0
-        current = high - fraction * (high - low)
-
-        # サニティチェック: 値域から大きく外れていたら採用しない
-        margin = (high - low) * 0.05
-        if not (low - margin <= current <= high + margin):
-            return None
-        return current
+        lo_th = low * 0.97
+        hi_th = high * 1.08
+        nums = re.findall(r'\d+\.?\d*', segment)
+        last_match: Optional[float] = None
+        for n in nums:
+            try:
+                v = float(n)
+            except ValueError:
+                continue
+            if lo_th <= v <= hi_th:
+                last_match = v
+        return last_match
     except Exception:
         return None
 
 
-def _parse_sekai_q_calls(text: str) -> Dict[str, Dict[str, float]]:
+def _extract_current_from_svg(svg_text: str, low: float, high: float) -> Optional[float]:
+    """
+    [改良版・補助手法]
+    SVGパス文字列から「最後の点のY座標」を取り出して現在値を逆算する。
+
+    旧版の問題:
+      - svg_text 内の最初の 'M' しか試さなかった (q() 引数 'M' 始まりでない別文字列
+        を踏むと誤抽出)
+      - 'L'/'H'/'V' などのサブコマンド位置で path_data を打ち切るため、明示的に
+        L コマンドを使うパスでは2点しか拾えなかった
+
+    改良:
+      - すべての 'M' 位置を試行し、最も多くの数値が取れた候補を採用
+      - path_data の取り方を「引用符 ')' まで」に変更し、L/H/V等のサブコマンドは
+        境界として扱わず、全座標を吸い上げる (数値抽出時に文字は無視されるので問題なし)
+      - サニティを ±5% → ±15% に緩和 (リアルタイム値が日中レンジを超えることがある)
+    """
+    try:
+        margin = (high - low) * 0.15 if high > low else 0
+        sanity_lo = low - margin
+        sanity_hi = high + margin
+
+        # すべての 'M' 位置を試す
+        m_positions = [i for i, ch in enumerate(svg_text) if ch == 'M']
+        if not m_positions:
+            return None
+
+        best: Optional[float] = None
+        best_pts = 0
+
+        for m_pos in m_positions:
+            rest = svg_text[m_pos + 1:]
+
+            # path_data の終端: 引用符・閉じカッコまで (サブコマンドは境界にしない)
+            end = len(rest)
+            for ch in ('"', "'", ')', ';'):
+                idx = rest.find(ch)
+                if 0 < idx < end:
+                    end = idx
+            path_data = rest[:end]
+
+            # 区切り文字に依存せず、すべての浮動小数点数を抽出
+            nums = re.findall(r'\d+\.?\d*', path_data)
+            if len(nums) < 4:
+                continue
+            try:
+                values = [float(n) for n in nums]
+            except ValueError:
+                continue
+
+            ys = values[1::2]
+            if len(ys) < 2:
+                continue
+
+            last_y = ys[-1]
+            y_min = min(ys)
+            y_max = max(ys)
+            if y_max == y_min:
+                continue
+
+            # 線形補間: y_min(画面上部)=high, y_max(画面下部)=low
+            fraction = (last_y - y_min) / (y_max - y_min)   # 0.0〜1.0
+            current = high - fraction * (high - low)
+
+            if not (sanity_lo <= current <= sanity_hi):
+                continue
+
+            # 点数が多い解釈を優先 (本物のSVGパスは点が多いはず)
+            if len(ys) > best_pts:
+                best = current
+                best_pts = len(ys)
+
+        return best
+    except Exception:
+        return None
+
+
+def _parse_sekai_q_calls(text: str) -> Dict[str, Dict[str, Any]]:
     """
     q(count, low, high, offset, samples, 'svg...') の羅列を解析。
 
@@ -368,11 +434,14 @@ def _parse_sekai_q_calls(text: str) -> Dict[str, Dict[str, float]]:
       - 1番目 = 通常市場(金曜終値で固定)
       - 2番目 = サンデー24h CFD/参考値(リアルタイムで動く) ← ユーザーが見たいのはこっち
 
-    各エントリのSVGパス末尾を解析して 'current' 値を抽出。失敗時は None。
+    現在値の抽出は2段構え:
+      ① 注釈テキスト(price-range近傍の数字) — 大型指数(ダウ/NAS)向け・最も新鮮
+      ② SVGパス末尾Y座標から線形補間 — 補助・小型値(VIX)はこちらのみ
 
-    返り値: { "dow": {low, high, current}, "nas100": {...}, "vix": {...} }
+    返り値: { "dow": {low, high, current, source}, ... }
+      source は "annotation" | "svg" | "midpoint" で診断用
     """
-    candidates: Dict[str, List[Dict[str, float]]] = {}
+    candidates: Dict[str, List[Dict[str, Any]]] = {}
 
     matches = list(_Q_PATTERN.finditer(text))
     for i, m in enumerate(matches):
@@ -385,16 +454,23 @@ def _parse_sekai_q_calls(text: str) -> Dict[str, Dict[str, float]]:
         if not (low > 0 and high > 0 and high >= low):
             continue
 
-        # この q() 引数のあとから、次の q() 開始位置までを SVG 領域とみなす
-        svg_start = m.end()
+        # この q() 引数のあとから、次の q() 開始位置までを解析対象セグメントとする
+        seg_start = m.end()
         if i + 1 < len(matches):
-            svg_end = matches[i + 1].start()
+            seg_end = matches[i + 1].start()
         else:
-            svg_end = min(svg_start + 4000, len(text))
-        svg_segment = text[svg_start:svg_end]
+            seg_end = min(seg_start + 4000, len(text))
+        segment = text[seg_start:seg_end]
 
-        # SVGパス末尾から現在値を逆算
-        current = _extract_current_from_svg(svg_segment, low, high)
+        # ① 注釈テキストから (大型指数のみ)
+        current = _extract_current_from_annotation(segment, low, high)
+        source = "annotation" if current is not None else None
+
+        # ② SVG末尾点から (注釈で取れなかった場合)
+        if current is None:
+            current = _extract_current_from_svg(segment, low, high)
+            if current is not None:
+                source = "svg"
 
         for name, lo, hi in _INSTRUMENT_RANGES:
             if lo <= low and high <= hi:
@@ -403,16 +479,20 @@ def _parse_sekai_q_calls(text: str) -> Dict[str, Dict[str, float]]:
                     "high": high,
                     "offset": offset,
                     "current": current,
+                    "source": source,
                 })
                 break
 
-    out: Dict[str, Dict[str, float]] = {}
+    out: Dict[str, Dict[str, Any]] = {}
     for name, cands in candidates.items():
         # 候補が2つ以上あれば2番目(サンデー版/24h版)を採用
         chosen = cands[1] if len(cands) >= 2 else cands[0]
-        entry = {"low": chosen["low"], "high": chosen["high"]}
+        entry: Dict[str, Any] = {"low": chosen["low"], "high": chosen["high"]}
         if chosen.get("current") is not None:
             entry["current"] = chosen["current"]
+            entry["source"] = chosen.get("source") or "unknown"
+        else:
+            entry["source"] = "midpoint"
         out[name] = entry
 
     return out
@@ -673,6 +753,7 @@ def fetch_synthetic_fx() -> Dict[str, Any]:
             "sekai_error": sekai_result.get("error"),
             "sekai_url": sekai_result.get("url"),
             "sekai_url_source": sekai_result.get("url_source", "n/a"),
+            "sekai_updated_at": _LAST_SEKAI_UPDATED_AT,   # URL更新時刻(コミット時)
             "recalc": recalc,
             "prev_closes": prev_closes,
             "as_of": nowjst.strftime("%H:%M:%S JST"),
@@ -875,9 +956,30 @@ def render_synthetic_fx(data: Dict[str, Any]) -> None:
         f'{src_label}</span>'
     ) if src_label else ""
 
+    # URL更新時刻のサブバッジ (UTC→JST 変換して表示)
+    updated_at_str = data.get("sekai_updated_at")
+    updated_badge = ""
+    if updated_at_str:
+        try:
+            # "2026-05-24 08:07:29 UTC" → datetime → JST
+            ts_part = updated_at_str.replace("UTC", "").strip()
+            dt_utc = datetime.strptime(ts_part, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+            dt_jst = dt_utc.astimezone(JST)
+            # 経過分数を出す (古さの目安)
+            now_utc = datetime.now(timezone.utc)
+            elapsed_min = int((now_utc - dt_utc).total_seconds() // 60)
+            updated_badge = (
+                f'<span style="background:#455a64;color:#fff;font-size:9px;'
+                f'padding:1px 6px;border-radius:3px;margin-left:4px;font-weight:600;">'
+                f'URL更新 {dt_jst.strftime("%H:%M")} ({elapsed_min}分前)'
+                f'</span>'
+            )
+        except Exception:
+            pass
+
     weekend_html = (
         f'<div class="syn-wrap syn-weekend-wrap">'
-        f'<div class="syn-weekend-title">📅 土日モード ({now_jst}){badge}</div>'
+        f'<div class="syn-weekend-title">📅 土日モード ({now_jst}){badge}{updated_badge}</div>'
         f'<div class="syn-weekend-subtitle">土日に動く為替と株価指数です。参考値です。</div>'
         f'<div class="syn-wrap" style="margin:0;">{weekend_row}</div>'
         f'</div>'
