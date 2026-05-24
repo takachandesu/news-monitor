@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import os
 import re
+import json
 import time
 import threading
 from datetime import datetime, timezone, timedelta
@@ -51,7 +52,8 @@ YAHOO_CHART_BASE = "https://query1.finance.yahoo.com/v8/finance/chart/"
 _INSTRUMENT_RANGES: List[Tuple[str, float, float]] = [
     ("dow",    35000, 70000),    # ダウ平均
     ("nas100", 15000, 40000),    # NASDAQ100 (ページ表示値)
-    ("oil",    20,    200),      # WTI原油 (サンデー原油 CFD)
+    ("oil",    30,    149),      # WTI原油 (サンデー原油 CFD)
+                                 # 上限149: ドル円(150-170)と衝突しないよう敢えて絞る
 ]
 
 # =====================================================
@@ -200,6 +202,38 @@ def _compute_synth_usdjpy() -> Optional[Dict[str, Any]]:
 # (2) sekai-kabuka.com  =  土日ダウ / NASDAQ100 / VIX
 # =====================================================
 SEKAI_LOCAL_URL_FILE = "sekai_data_url.txt"  # GitHub Actions が更新する自動URLファイル
+SEKAI_INDICES_FILE = "sekai_indices.json"     # GitHub Actions が DOM スクレイプして書き出す現在値
+
+
+def _read_dom_indices() -> Dict[str, float]:
+    """
+    GitHub Actions の Playwright が DOM から抽出した現在値を読む。
+    refresh_sekai_url.py が sekai_indices.json に書き出した内容。
+
+    形式: {"updated_at": "...", "values": {"dow": 51085.5, "oil": 90.53, ...}}
+
+    返り値: {"dow": 51085.5, ...} or 空dict
+    """
+    try:
+        if not os.path.exists(SEKAI_INDICES_FILE):
+            return {}
+        with open(SEKAI_INDICES_FILE, "r", encoding="utf-8") as f:
+            obj = json.load(f)
+        if not isinstance(obj, dict):
+            return {}
+        vals = obj.get("values") or {}
+        if not isinstance(vals, dict):
+            return {}
+        # 妥当性チェックして float に統一
+        out: Dict[str, float] = {}
+        for k, v in vals.items():
+            try:
+                out[k] = float(v)
+            except (TypeError, ValueError):
+                continue
+        return out
+    except Exception:
+        return {}
 
 
 def _read_url_from_local_file() -> Optional[str]:
@@ -415,42 +449,88 @@ def _parse_sekai_q_calls(text: str) -> Dict[str, Dict[str, float]]:
             entry["current"] = chosen["current"]
         out[name] = entry
 
+    # デバッグ情報: 全候補を __debug__ キーに含めて返す (renderで確認用)
+    debug_info = {}
+    for name, cands in candidates.items():
+        debug_info[name] = [
+            f"lo={c['low']:.2f} hi={c['high']:.2f} ofs={c['offset']} cur={c.get('current')}"
+            for c in cands
+        ]
+    out["__debug__"] = debug_info  # type: ignore
+
     return out
 
 
 def _fetch_sekai_indices() -> Dict[str, Any]:
-    """sekai-kabuka.com からダウ/NAS100/VIX を取得。常にdictを返し、失敗時は error に理由を入れる"""
+    """sekai-kabuka.com からダウ/NAS100/原油を取得。常にdictを返し、失敗時は error に理由を入れる
+
+    優先順位:
+      1) sekai_indices.json (GitHub Actions が DOMスクレイプ。本家と完全一致の現在値)
+      2) sekai_data_url.txt の q() データ → SVG パース (フォールバック)
+    """
+    # ── DOM 取得値を最優先で読む
+    dom_vals = _read_dom_indices()
+
+    # ── 既存ロジック: データURLから q() を取って SVG パース
     url, url_source = _discover_sekai_data_url()
-    if not url:
-        return {"data": {}, "error": "URL抽出失敗(HTML/Secrets共に取れず)", "url": None, "url_source": "none"}
+    parsed: Dict[str, Dict[str, float]] = {}
+    err: Optional[str] = None
 
-    # キャッシュバスターを付与 (CDNキャッシュ回避)
-    sep = "&" if "?" in url else "?"
-    url_with_bust = f"{url}{sep}_={int(time.time())}"
+    if url:
+        # キャッシュバスターを付与 (CDNキャッシュ回避)
+        sep = "&" if "?" in url else "?"
+        url_with_bust = f"{url}{sep}_={int(time.time())}"
+        r = _safe_get(url_with_bust, headers={
+            "Accept": "*/*",
+            "Accept-Language": "ja,en-US;q=0.9",
+            "Accept-Encoding": "gzip, deflate, br",
+            "Referer": "https://sekai-kabuka.com/",
+            "Sec-Fetch-Dest": "script",
+            "Sec-Fetch-Mode": "no-cors",
+            "Sec-Fetch-Site": "same-site",
+            "Cache-Control": "no-cache",
+            "Pragma": "no-cache",
+        }, timeout=10)
+        if r:
+            try:
+                text = r.content.decode("shift_jis", errors="ignore")
+            except Exception:
+                text = r.text or ""
+            try:
+                parsed = _parse_sekai_q_calls(text)
+            except Exception as e:
+                err = f"parse_error: {e}"
+        else:
+            err = "データURLへのGETが失敗"
+    else:
+        err = "URL抽出失敗"
 
-    r = _safe_get(url_with_bust, headers={
-        "Accept": "*/*",
-        "Accept-Language": "ja,en-US;q=0.9",
-        "Accept-Encoding": "gzip, deflate, br",
-        "Referer": "https://sekai-kabuka.com/",
-        "Sec-Fetch-Dest": "script",
-        "Sec-Fetch-Mode": "no-cors",
-        "Sec-Fetch-Site": "same-site",
-        "Cache-Control": "no-cache",
-        "Pragma": "no-cache",
-    }, timeout=10)
-    if not r:
-        return {"data": {}, "error": "データURLへのGETが失敗", "url": url, "url_source": url_source}
-    # requestsは Content-Encoding: gzip を自動展開する
-    try:
-        text = r.content.decode("shift_jis", errors="ignore")
-    except Exception:
-        text = r.text or ""
+    # ── DOM値で上書き (最優先)
+    # parsed[name] には {low, high, current?} が入っている
+    # DOM値があればそれを "current" として強制上書き
+    for name, dom_val in dom_vals.items():
+        if name in parsed:
+            parsed[name]["current"] = dom_val
+        else:
+            # parsed にエントリが無くてもDOMだけで成立させる
+            parsed[name] = {"low": dom_val, "high": dom_val, "current": dom_val}
 
-    parsed = _parse_sekai_q_calls(text)
     if not parsed:
-        return {"data": {}, "error": "q()パターンが見つからず", "url": url, "url_source": url_source}
-    return {"data": parsed, "error": None, "url": url, "url_source": url_source}
+        return {
+            "data": {},
+            "error": err or "no data",
+            "url": url,
+            "url_source": url_source if url else "none",
+            "dom_count": len(dom_vals),
+        }
+
+    return {
+        "data": parsed,
+        "error": None,
+        "url": url,
+        "url_source": url_source if url else "none",
+        "dom_count": len(dom_vals),
+    }
 
 
 # =====================================================
@@ -701,6 +781,43 @@ def render_synthetic_fx(data: Dict[str, Any]) -> None:
     recalc = data.get("recalc") or {}
     synth = data.get("synth_usdjpy")
     sekai = data.get("sekai") or {}
+    # デバッグ情報を取り出して別管理（sekaiから外す）
+    _sekai_debug = sekai.pop("__debug__", None) if isinstance(sekai, dict) else None
+    dom_count = data.get("dom_count", 0)
+    if _sekai_debug is not None or dom_count is not None:
+        try:
+            lines = [f"DOM scrape: {dom_count} 銘柄取得済み (sekai_indices.json)"]
+            # 各銘柄の最終値
+            for name in ("dow", "nas100", "oil", "vix"):
+                if name in sekai:
+                    info = sekai[name]
+                    cur = info.get("current")
+                    lo = info.get("low")
+                    hi = info.get("high")
+                    cur_s = f"{cur:.2f}" if cur is not None else "None"
+                    lo_s = f"{lo:.2f}" if lo is not None else "None"
+                    hi_s = f"{hi:.2f}" if hi is not None else "None"
+                    lines.append(f"<b>{name}</b>: cur={cur_s} (low={lo_s} high={hi_s})")
+            # q() 候補も追加表示
+            if _sekai_debug:
+                lines.append("--- q() 候補一覧 ---")
+                for name, cands_list in _sekai_debug.items():
+                    lines.append(f"<b>{name}</b> ({len(cands_list)}件):")
+                    for j, c in enumerate(cands_list):
+                        marker = " ★採用" if j == (1 if len(cands_list) >= 2 else 0) else ""
+                        lines.append(f"&nbsp;&nbsp;[{j}] {c}{marker}")
+            dbg_html = "<br/>".join(lines)
+            st.markdown(
+                f'<div style="background:#fff3cd;border:2px solid #f5b400;'
+                f'padding:8px;margin:4px 0;font-family:monospace;font-size:11px;'
+                f'color:#5a4500;border-radius:6px;">'
+                f'<b>🔧 sekai-kabuka 取得状況 (一時デバッグ)</b><br/>'
+                f'{dbg_html}'
+                f'</div>',
+                unsafe_allow_html=True
+            )
+        except Exception:
+            pass
     sekai_error = data.get("sekai_error")
     now_jst = data.get("now_jst", "")
 
