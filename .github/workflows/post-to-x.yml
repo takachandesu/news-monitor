@@ -69,10 +69,10 @@ jobs:
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add posted_state.json sekai_data_url.txt 2>/dev/null || true
+          git add posted_state.json sekai_data_url.txt sekai_indices.json 2>/dev/null || true
           if git diff --cached --quiet; then
             echo "No changes to commit."
           else
-            git commit -m "Update posted_state and/or sekai URL [skip ci]"
+            git commit -m "Update posted_state / sekai URL / indices [skip ci]"
             git push
           fi
