@@ -13,6 +13,11 @@ GitHub Actions から10分おきに呼ばれる前提（環境変数で認証情
   - 安全装置: 1日上限/1回上限/最小間隔/時間帯/月予算 を多段ガード
   - 翻訳失敗（日本語化できなかった）場合は投稿スキップ
 
+★ コスト最適化（2026/05 改定）★
+  X API は本文にURLを含む投稿が $0.20/件、含まないと $0.015/件 (13倍差)。
+  そこで N回に1回だけURL付きフォーマットを使い、実効単価を大幅に下げる。
+  URL_EVERY_N_POSTS=10 で実効単価は約 $0.0335/件 (URL毎回より約 6 倍安い)。
+
 環境変数:
   TWITTERAPI_IO_KEY   TwitterAPI.io の API キー（既存と共用可）
   CLAUDE_API_KEY      Anthropic Claude API キー（既存と共用可）
@@ -40,15 +45,28 @@ import anthropic
 
 MAX_POSTS_PER_RUN   = 1       # 1回の実行で投稿する最大件数
 MAX_POSTS_PER_DAY   = 2       # 1日あたりの投稿上限（実質1.5件/日想定）
-MAX_POSTS_PER_MONTH = 25      # 1か月あたりの投稿上限（× $0.20 = $5）
+MAX_POSTS_PER_MONTH = 25      # 1か月あたりの投稿上限
+                              # ※ URL頻度を下げた今、$5予算なら最大147件まで可能。
+                              #    投稿件数を増やしたい場合はここを上げる。
 MIN_INTERVAL_SEC    = 3600    # 投稿と投稿の最小間隔(秒) = 60分
 
 POSTING_HOUR_START_JST = 6    # 投稿OK開始時刻（JST、0-23の整数）
 POSTING_HOUR_END_JST   = 23   # 投稿OK終了時刻（JST、これ未満ならOK）
 
-# 月予算ガード（X Developer Console の実績から算出した実コスト）
-ESTIMATED_COST_PER_POST_USD = 0.20   # 1投稿あたりの実コスト($) ※実績ベース
-MONTHLY_BUDGET_USD          = 5.0    # 月予算($) 超えたら停止
+# ─── URL頻度のコントロール（コスト最適化のキモ）───
+URL_EVERY_N_POSTS = 10        # N回に1回だけ本文にブログURLを入れる
+                              # 1=毎回、2=半分、3=1/3、5=1/5、10=1/10、999=ほぼ無し
+
+# X API 単価（2026/04/20 改定後の実コスト。Developer Console で要確認）
+COST_PER_URL_POST_USD   = 0.20    # URL付き投稿の単価
+COST_PER_PLAIN_POST_USD = 0.015   # URLなし投稿の単価
+
+# 実効単価（URL_EVERY_N_POSTS から自動計算）
+ESTIMATED_COST_PER_POST_USD = (
+    COST_PER_URL_POST_USD / URL_EVERY_N_POSTS
+    + COST_PER_PLAIN_POST_USD * (URL_EVERY_N_POSTS - 1) / URL_EVERY_N_POSTS
+)
+MONTHLY_BUDGET_USD = 5.0      # 月予算($) 超えたら停止
 
 # ═══════════════════════════════════════════════════════
 
@@ -105,6 +123,8 @@ def load_state() -> Dict:
         "last_post_at": 0,           # 最終投稿の epoch 秒
         "daily_counts": {},          # {"2026-05-23": 12, ...}
         "monthly_counts": {},        # {"2026-05": 187, ...}
+        "total_post_count": 0,       # 累計投稿数（URL頻度判定用、リセットしない）
+        "url_post_counts": {},       # {"2026-05": 3, ...} URL付き投稿だけの月次集計
     }
     if os.path.exists(STATE_PATH):
         try:
@@ -155,17 +175,44 @@ def save_state(state: Dict) -> None:
     mc_pruned[this_month] = mc.get(this_month, 0)
     state["monthly_counts"] = mc_pruned
 
+    # url_post_counts: 同様に直近13か月分のみ保持
+    upc = state.get("url_post_counts", {})
+    upc_pruned = {}
+    for ym in upc.keys():
+        try:
+            yy, mm = ym.split("-")
+            if (int(yy), int(mm)) >= (int(this_month[:4]) - 1, 1):
+                upc_pruned[ym] = upc[ym]
+        except Exception:
+            pass
+    upc_pruned[this_month] = upc.get(this_month, 0)
+    state["url_post_counts"] = upc_pruned
+
     with open(STATE_PATH, "w", encoding="utf-8") as f:
         json.dump(state, f, indent=2, ensure_ascii=False)
 
 
-def _increment_post_count(state: Dict) -> None:
+def _increment_post_count(state: Dict, with_url: bool) -> None:
     """投稿成功時に呼ぶ。日次・月次カウントを加算。"""
     today = _today_jst_str()
     this_month = _this_month_jst_str()
     state["daily_counts"][today] = state["daily_counts"].get(today, 0) + 1
     state["monthly_counts"][this_month] = state["monthly_counts"].get(this_month, 0) + 1
+    state["total_post_count"] = state.get("total_post_count", 0) + 1
+    if with_url:
+        state["url_post_counts"][this_month] = (
+            state.get("url_post_counts", {}).get(this_month, 0) + 1
+        )
     state["last_post_at"] = int(time.time())
+
+
+def _calc_actual_monthly_cost(state: Dict) -> float:
+    """今月の実コストを「URL付き件数 × $0.20 + URLなし件数 × $0.015」で計算。"""
+    this_month = _this_month_jst_str()
+    total = state.get("monthly_counts", {}).get(this_month, 0)
+    url_count = state.get("url_post_counts", {}).get(this_month, 0)
+    plain_count = max(0, total - url_count)
+    return url_count * COST_PER_URL_POST_USD + plain_count * COST_PER_PLAIN_POST_USD
 
 
 # ───────────────────────────────────────────────
@@ -198,12 +245,12 @@ def can_post_now(state: Dict) -> Tuple[bool, str]:
     if month_count >= MAX_POSTS_PER_MONTH:
         return False, f"今月({this_month})の上限{MAX_POSTS_PER_MONTH}件に到達({month_count}件投稿済)"
 
-    # (4) 月予算チェック
-    est_cost = month_count * ESTIMATED_COST_PER_POST_USD
-    if est_cost >= MONTHLY_BUDGET_USD:
+    # (4) 月予算チェック（実コスト + 次の1投稿の最大コストで判定）
+    actual_cost = _calc_actual_monthly_cost(state)
+    # 次の1投稿が最悪URL付き($0.20)になるかもしれないので、上振れで見る
+    if actual_cost + COST_PER_URL_POST_USD > MONTHLY_BUDGET_USD:
         return False, (
-            f"今月の予想コスト${est_cost:.2f}が予算${MONTHLY_BUDGET_USD:.2f}に到達"
-            f"({month_count}件×${ESTIMATED_COST_PER_POST_USD}/件)"
+            f"今月の実コスト${actual_cost:.3f} + 次投稿$0.20 が予算${MONTHLY_BUDGET_USD:.2f}を超過"
         )
 
     # (5) 投稿間隔チェック
@@ -363,25 +410,50 @@ def clean_for_post(text: str) -> str:
     return cleaned
 
 
-def format_tweet(body: str, handle: str) -> str:
+def should_include_url(state: Dict) -> bool:
+    """次の投稿にURLを含めるかを判定。
+    URL_EVERY_N_POSTS=10 なら、累計投稿数を10で割った余りが0の時にURL付き。
+    つまり 1件目、11件目、21件目、... にURL付き投稿。
     """
-    投稿フォーマット：
+    if URL_EVERY_N_POSTS <= 1:
+        return True  # 1=毎回URL付き
+    next_index = state.get("total_post_count", 0)  # 0始まりで次投稿のindex
+    return (next_index % URL_EVERY_N_POSTS) == 0
 
+
+def format_tweet(body: str, handle: str, include_url: bool) -> str:
+    """
+    投稿フォーマット（2パターン）：
+
+    [URL付き] N回に1回:
         🔴速報
         [本文]
 
         詳細は以下News Headline Monitorをクリック。Xよりも早くニュースがでます。
         https://moo-stock-blog.com/news-headline-monitor/
+
+    [URLなし] 残りN-1回:
+        🔴速報
+        [本文]
+
+        詳細はプロフィール固定の「News Headline Monitor」へ
     """
     if len(body) > BODY_MAX_CHARS:
         body = body[:BODY_MAX_CHARS - 1] + "…"
 
-    return (
-        "🔴速報\n"
-        f"{body}\n\n"
-        "詳細は以下News Headline Monitorをクリック。Xよりも早くニュースがでます。\n"
-        f"{BLOG_URL}"
-    )
+    if include_url:
+        return (
+            "🔴速報\n"
+            f"{body}\n\n"
+            "詳細は以下News Headline Monitorをクリック。Xよりも早くニュースがでます。\n"
+            f"{BLOG_URL}"
+        )
+    else:
+        return (
+            "🔴速報\n"
+            f"{body}\n\n"
+            "詳細はプロフィール固定の「News Headline Monitor」へ"
+        )
 
 
 # ───────────────────────────────────────────────
@@ -431,13 +503,16 @@ def main() -> int:
     this_month = _this_month_jst_str()
     today_count = state.get("daily_counts", {}).get(today, 0)
     month_count = state.get("monthly_counts", {}).get(this_month, 0)
-    est_monthly_cost = month_count * ESTIMATED_COST_PER_POST_USD
+    url_count   = state.get("url_post_counts", {}).get(this_month, 0)
+    actual_cost = _calc_actual_monthly_cost(state)
 
     log(
         f"[INFO] 開始 / 投稿済み(累計): {len(posted_ids)}件 "
         f"/ 本日 {today_count}/{MAX_POSTS_PER_DAY}件 "
         f"/ 今月 {month_count}/{MAX_POSTS_PER_MONTH}件 "
-        f"/ 想定コスト ${est_monthly_cost:.2f}/${MONTHLY_BUDGET_USD:.2f}"
+        f"(URL付き{url_count}件) "
+        f"/ 実コスト ${actual_cost:.3f}/${MONTHLY_BUDGET_USD:.2f} "
+        f"(実効単価${ESTIMATED_COST_PER_POST_USD:.4f}/件, URL頻度1/{URL_EVERY_N_POSTS})"
     )
 
     # ── ★ 安全装置: 全体ガードをまず判定（取得すらしないことでコスト節約）
@@ -519,19 +594,22 @@ def main() -> int:
             if not body_clean:
                 continue
 
-            tweet_text = format_tweet(body_clean, handle)
+            # ★ URL付きにするかどうか判定
+            include_url = should_include_url(state)
+            tweet_text = format_tweet(body_clean, handle, include_url)
+            cost_tag = "URL付き($0.20)" if include_url else "URLなし($0.015)"
 
             # 投稿
-            log(f"[POST] @{handle} src_id={tid} body={body_clean[:50]}")
+            log(f"[POST] @{handle} src_id={tid} {cost_tag} body={body_clean[:50]}")
             ok, info = post_to_x(tweet_text, x_client)
 
             if ok:
                 posted_ids.add(tid)
                 posts_this_run += 1
-                _increment_post_count(state)
+                _increment_post_count(state, with_url=include_url)
                 state["posted_ids"] = list(posted_ids)
                 save_state(state)
-                log(f"[OK]   posted, new_x_id={info}")
+                log(f"[OK]   posted, new_x_id={info} (累計{state['total_post_count']}件目)")
                 time.sleep(SLEEP_BETWEEN_POSTS)
             else:
                 log(f"[ERR]  {info}")
@@ -544,14 +622,16 @@ def main() -> int:
     state["posted_ids"] = list(posted_ids)
     save_state(state)
 
-    final_today  = state.get("daily_counts", {}).get(today, 0)
-    final_month  = state.get("monthly_counts", {}).get(this_month, 0)
-    final_cost   = final_month * ESTIMATED_COST_PER_POST_USD
+    final_today = state.get("daily_counts", {}).get(today, 0)
+    final_month = state.get("monthly_counts", {}).get(this_month, 0)
+    final_url   = state.get("url_post_counts", {}).get(this_month, 0)
+    final_cost  = _calc_actual_monthly_cost(state)
     log(
         f"[INFO] 終了 / 今回投稿: {posts_this_run}件 "
         f"/ 本日累計 {final_today}/{MAX_POSTS_PER_DAY}件 "
         f"/ 今月累計 {final_month}/{MAX_POSTS_PER_MONTH}件 "
-        f"/ 想定コスト ${final_cost:.2f}/${MONTHLY_BUDGET_USD:.2f}"
+        f"(URL付き{final_url}件) "
+        f"/ 実コスト ${final_cost:.3f}/${MONTHLY_BUDGET_USD:.2f}"
     )
     return 0
 
