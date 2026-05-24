@@ -9,8 +9,8 @@ GitHub Actions から10分おきに呼ばれる前提（環境変数で認証情
 仕様:
   - FirstSquawk: 全件速報扱い → Claude Haiku 4.5 で日本語翻訳して投稿
   - Yuto_Headline: 「*」または「＊」で始まる速報のみ → 日本語なので翻訳しない
-  - posted_state.json で投稿済み tweet_id を管理（直近300件保持）
-  - 1回の実行で最大10件まで投稿（暴走防止）
+  - posted_state.json で投稿済み tweet_id、日次/月次の投稿回数、最終投稿時刻を管理
+  - 安全装置: 1日上限/1回上限/最小間隔/時間帯/月予算 を多段ガード
   - 翻訳失敗（日本語化できなかった）場合は投稿スキップ
 
 環境変数:
@@ -26,6 +26,7 @@ import os
 import sys
 import json
 import time
+from datetime import datetime, timezone, timedelta
 from typing import Dict, List, Tuple
 
 import requests
@@ -33,17 +34,32 @@ import tweepy
 import anthropic
 
 
-# ───────────────────────────────────────────────
-# 定数
-# ───────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════
+# ★ 安全装置の設定（必要に応じてここだけ調整すればOK）★
+# ═══════════════════════════════════════════════════════
+
+MAX_POSTS_PER_RUN   = 1       # 1回の実行で投稿する最大件数
+MAX_POSTS_PER_DAY   = 2       # 1日あたりの投稿上限（実質1.5件/日想定）
+MAX_POSTS_PER_MONTH = 25      # 1か月あたりの投稿上限（× $0.20 = $5）
+MIN_INTERVAL_SEC    = 3600    # 投稿と投稿の最小間隔(秒) = 60分
+
+POSTING_HOUR_START_JST = 6    # 投稿OK開始時刻（JST、0-23の整数）
+POSTING_HOUR_END_JST   = 23   # 投稿OK終了時刻（JST、これ未満ならOK）
+
+# 月予算ガード（X Developer Console の実績から算出した実コスト）
+ESTIMATED_COST_PER_POST_USD = 0.20   # 1投稿あたりの実コスト($) ※実績ベース
+MONTHLY_BUDGET_USD          = 5.0    # 月予算($) 超えたら停止
+
+# ═══════════════════════════════════════════════════════
 
 STATE_PATH = "posted_state.json"
-MAX_STATE_ENTRIES = 300    # state.json に保持する tweet_id の最大件数
-MAX_POSTS_PER_RUN = 10     # 1回の実行で投稿する上限（暴走防止）
-LOOKBACK_MINUTES = 60      # TwitterAPI.io 検索の遡及範囲（分）
-SLEEP_BETWEEN_POSTS = 2    # 投稿の間隔（秒）
+MAX_STATE_ENTRIES = 300       # state.json に保持する tweet_id の最大件数
+LOOKBACK_MINUTES = 60         # TwitterAPI.io 検索の遡及範囲（分）
+SLEEP_BETWEEN_POSTS = 3       # post間の最小pause（秒、上記MIN_INTERVALとは別）
 BLOG_URL = "https://moo-stock-blog.com/news-headline-monitor/"
-BODY_MAX_CHARS = 80        # 投稿本文の最大文字数（X 280文字制限に余裕を持たせる）
+BODY_MAX_CHARS = 80           # 投稿本文の最大文字数
+
+JST = timezone(timedelta(hours=9))
 
 # アカウント設定（app.py の account_configs と整合）
 ACCOUNT_CONFIGS = [
@@ -73,32 +89,138 @@ def log(msg: str) -> None:
 # 状態ファイル
 # ───────────────────────────────────────────────
 
+def _today_jst_str() -> str:
+    return datetime.now(JST).strftime("%Y-%m-%d")
+
+
+def _this_month_jst_str() -> str:
+    return datetime.now(JST).strftime("%Y-%m")
+
+
 def load_state() -> Dict:
     """posted_state.json を読み込み。存在しなければ空状態を返す。"""
+    default = {
+        "posted_ids": [],
+        "last_run_at": None,
+        "last_post_at": 0,           # 最終投稿の epoch 秒
+        "daily_counts": {},          # {"2026-05-23": 12, ...}
+        "monthly_counts": {},        # {"2026-05": 187, ...}
+    }
     if os.path.exists(STATE_PATH):
         try:
             with open(STATE_PATH, "r", encoding="utf-8") as f:
                 data = json.load(f)
                 if not isinstance(data, dict):
-                    return {"posted_ids": [], "last_run_at": None}
-                data.setdefault("posted_ids", [])
-                data.setdefault("last_run_at", None)
+                    return default
+                # 既存キーは尊重、足りないキーは default で補う
+                for k, v in default.items():
+                    data.setdefault(k, v)
                 return data
         except Exception as e:
             log(f"[WARN] state.json 読込失敗: {e}. 空状態でスタート")
-    return {"posted_ids": [], "last_run_at": None}
+    return default
 
 
 def save_state(state: Dict) -> None:
-    """投稿済み tweet_id は直近 MAX_STATE_ENTRIES 件だけ保持する。"""
+    """投稿済み tweet_id は直近 MAX_STATE_ENTRIES 件、daily/monthly は古いものを掃除。"""
     state["posted_ids"] = list(state.get("posted_ids", []))[-MAX_STATE_ENTRIES:]
     state["last_run_at"] = int(time.time())
+
+    # daily_counts: 直近31日分のみ保持
+    today = _today_jst_str()
+    dc = state.get("daily_counts", {})
+    today_dt = datetime.strptime(today, "%Y-%m-%d").date()
+    dc_pruned = {}
+    for d, c in dc.items():
+        try:
+            dd = datetime.strptime(d, "%Y-%m-%d").date()
+            if (today_dt - dd).days <= 31:
+                dc_pruned[d] = c
+        except Exception:
+            pass
+    state["daily_counts"] = dc_pruned
+
+    # monthly_counts: 直近12か月のみ保持
+    this_month = _this_month_jst_str()
+    mc = state.get("monthly_counts", {})
+    mc_pruned = {}
+    for ym in mc.keys():
+        # ざっくり過去13か月内の年-月だけ残す
+        try:
+            yy, mm = ym.split("-")
+            if (int(yy), int(mm)) >= (int(this_month[:4]) - 1, 1):
+                mc_pruned[ym] = mc[ym]
+        except Exception:
+            pass
+    mc_pruned[this_month] = mc.get(this_month, 0)
+    state["monthly_counts"] = mc_pruned
+
     with open(STATE_PATH, "w", encoding="utf-8") as f:
         json.dump(state, f, indent=2, ensure_ascii=False)
 
 
+def _increment_post_count(state: Dict) -> None:
+    """投稿成功時に呼ぶ。日次・月次カウントを加算。"""
+    today = _today_jst_str()
+    this_month = _this_month_jst_str()
+    state["daily_counts"][today] = state["daily_counts"].get(today, 0) + 1
+    state["monthly_counts"][this_month] = state["monthly_counts"].get(this_month, 0) + 1
+    state["last_post_at"] = int(time.time())
+
+
 # ───────────────────────────────────────────────
-# TwitterAPI.io 経由でツイート取得（app.py の _twitterapi_io_search 相当）
+# ★ 安全装置: 投稿してよいか判定する
+# ───────────────────────────────────────────────
+
+def can_post_now(state: Dict) -> Tuple[bool, str]:
+    """
+    今このタイミングで投稿してよいか判定する。
+    Returns: (OKならTrue, 不可なら理由文字列)
+    """
+    now = datetime.now(JST)
+
+    # (1) 時間帯チェック
+    if not (POSTING_HOUR_START_JST <= now.hour < POSTING_HOUR_END_JST):
+        return False, (
+            f"投稿可能時間帯外 (JST {now.hour}:{now.minute:02d}, "
+            f"許可: {POSTING_HOUR_START_JST}:00-{POSTING_HOUR_END_JST}:00)"
+        )
+
+    # (2) 1日上限チェック
+    today = _today_jst_str()
+    today_count = state.get("daily_counts", {}).get(today, 0)
+    if today_count >= MAX_POSTS_PER_DAY:
+        return False, f"本日({today})の上限{MAX_POSTS_PER_DAY}件に到達({today_count}件投稿済)"
+
+    # (3) 1か月上限チェック
+    this_month = _this_month_jst_str()
+    month_count = state.get("monthly_counts", {}).get(this_month, 0)
+    if month_count >= MAX_POSTS_PER_MONTH:
+        return False, f"今月({this_month})の上限{MAX_POSTS_PER_MONTH}件に到達({month_count}件投稿済)"
+
+    # (4) 月予算チェック
+    est_cost = month_count * ESTIMATED_COST_PER_POST_USD
+    if est_cost >= MONTHLY_BUDGET_USD:
+        return False, (
+            f"今月の予想コスト${est_cost:.2f}が予算${MONTHLY_BUDGET_USD:.2f}に到達"
+            f"({month_count}件×${ESTIMATED_COST_PER_POST_USD}/件)"
+        )
+
+    # (5) 投稿間隔チェック
+    last_post_at = state.get("last_post_at", 0)
+    if last_post_at:
+        elapsed = int(time.time()) - last_post_at
+        if elapsed < MIN_INTERVAL_SEC:
+            return False, (
+                f"前回投稿から{elapsed}秒しか経過していない"
+                f"(最小間隔{MIN_INTERVAL_SEC}秒)"
+            )
+
+    return True, ""
+
+
+# ───────────────────────────────────────────────
+# TwitterAPI.io 経由でツイート取得
 # ───────────────────────────────────────────────
 
 def fetch_tweets_via_twitterapi_io(handle: str, api_key: str) -> Tuple[List[Dict], str]:
@@ -148,7 +270,7 @@ def fetch_tweets_via_twitterapi_io(handle: str, api_key: str) -> Tuple[List[Dict
 
 
 # ───────────────────────────────────────────────
-# Claude による翻訳（app.py の _translate_to_japanese 相当）
+# Claude による翻訳
 # ───────────────────────────────────────────────
 
 def translate_to_japanese(english_text: str, claude_client: anthropic.Anthropic) -> str:
@@ -156,7 +278,6 @@ def translate_to_japanese(english_text: str, claude_client: anthropic.Anthropic)
     if not english_text or not english_text.strip():
         return english_text
 
-    # 数値・記号だけは翻訳しない（コスト節約）
     letter_count = sum(1 for c in english_text if c.isalpha())
     if letter_count < 3:
         return english_text
@@ -169,9 +290,22 @@ def translate_to_japanese(english_text: str, claude_client: anthropic.Anthropic)
                 {
                     "role": "user",
                     "content": (
-                        "次の英語の金融速報ヘッドラインを、自然な日本語に翻訳してください。"
-                        "翻訳結果のみを出力し、説明や前置きは一切付けないでください。"
-                        "ニュース速報らしい簡潔な表現でお願いします。\n\n"
+                        "次の英語の金融速報ヘッドラインを、自然な日本語に翻訳してください。\n"
+                        "\n"
+                        "【厳守ルール】\n"
+                        "1. 翻訳結果のみを出力し、説明や前置きは一切付けないこと。\n"
+                        "2. ニュース速報らしい簡潔な表現にすること。\n"
+                        "3. 原文に書かれていない情報を一切補足しないこと。\n"
+                        "   例: 原文が 'Trump' なら『トランプ』とだけ訳す。\n"
+                        "       『前大統領』『元大統領』『現大統領』『氏』『大統領』など、\n"
+                        "       原文に書かれていない肩書き・敬称・属性を勝手に足さない。\n"
+                        "4. 人物名は原文のまま訳す。原文が 'Powell' なら『パウエル』、\n"
+                        "   'Yellen' なら『イエレン』、'Ueda' なら『植田』など。\n"
+                        "   原文に役職(Fed Chair, Treasury Secretary, BOJ Governor等)が\n"
+                        "   明示されている場合のみ役職を付ける。\n"
+                        "5. 国名・組織名・通貨も原文に書かれている範囲で訳す。\n"
+                        "\n"
+                        "【原文】\n"
                         + english_text
                     ),
                 }
@@ -225,7 +359,6 @@ def is_reply_or_retweet(tweet: Dict) -> bool:
 def clean_for_post(text: str) -> str:
     """投稿用に本文を整形。先頭の * や ＊、連続改行などを除去。"""
     cleaned = text.lstrip(" \t\r\n\"'＂　*＊").strip()
-    # 改行はスペースに（X 上での見栄え）
     cleaned = " ".join(cleaned.split())
     return cleaned
 
@@ -291,6 +424,29 @@ def main() -> int:
     twitterapi_key = os.environ["TWITTERAPI_IO_KEY"]
     claude_key = os.environ["CLAUDE_API_KEY"]
 
+    # ── 状態読込
+    state = load_state()
+    posted_ids = set(state.get("posted_ids", []))
+    today = _today_jst_str()
+    this_month = _this_month_jst_str()
+    today_count = state.get("daily_counts", {}).get(today, 0)
+    month_count = state.get("monthly_counts", {}).get(this_month, 0)
+    est_monthly_cost = month_count * ESTIMATED_COST_PER_POST_USD
+
+    log(
+        f"[INFO] 開始 / 投稿済み(累計): {len(posted_ids)}件 "
+        f"/ 本日 {today_count}/{MAX_POSTS_PER_DAY}件 "
+        f"/ 今月 {month_count}/{MAX_POSTS_PER_MONTH}件 "
+        f"/ 想定コスト ${est_monthly_cost:.2f}/${MONTHLY_BUDGET_USD:.2f}"
+    )
+
+    # ── ★ 安全装置: 全体ガードをまず判定（取得すらしないことでコスト節約）
+    ok_global, reason = can_post_now(state)
+    if not ok_global:
+        log(f"[STOP] 全体ガード: {reason}")
+        save_state(state)
+        return 0
+
     # ── クライアント初期化
     claude_client = anthropic.Anthropic(api_key=claude_key)
     x_client = tweepy.Client(
@@ -299,11 +455,6 @@ def main() -> int:
         access_token=os.environ["X_ACCESS_TOKEN"],
         access_token_secret=os.environ["X_ACCESS_SECRET"],
     )
-
-    # ── 状態読込
-    state = load_state()
-    posted_ids = set(state.get("posted_ids", []))
-    log(f"[INFO] 開始 / 過去投稿済み: {len(posted_ids)} 件")
 
     # ── 各アカウントを処理
     posts_this_run = 0
@@ -329,6 +480,13 @@ def main() -> int:
                 log(f"[INFO] 1回の上限({MAX_POSTS_PER_RUN}件)到達 → 中断")
                 break
 
+            # ★ 投稿ごとに再判定（最小間隔・日次上限）
+            ok_each, reason_each = can_post_now(state)
+            if not ok_each:
+                log(f"[STOP] ループ内ガード: {reason_each}")
+                rate_limited = True
+                break
+
             tid = str(t.get("id") or "")
             if not tid:
                 continue
@@ -343,14 +501,13 @@ def main() -> int:
             if not passes_filter(text, acc["filter"]):
                 continue
 
-            # 本文の1行目を切り出し（app.py と同じロジック）
+            # 本文の1行目を切り出し
             first_line = text.split("\n", 1)[0].strip()
             raw_body = first_line[:160] if first_line else text[:160]
 
             # 翻訳
             if acc["translate"]:
                 body_ja = translate_to_japanese(raw_body, claude_client)
-                # 翻訳が日本語にならなかった場合は投稿しない
                 if not looks_like_japanese(body_ja):
                     log(f"[SKIP] 翻訳失敗の可能性, tweet_id={tid}, body={raw_body[:50]}")
                     continue
@@ -371,7 +528,7 @@ def main() -> int:
             if ok:
                 posted_ids.add(tid)
                 posts_this_run += 1
-                # 投稿の都度 state を保存（途中失敗時の二重投稿を緩和）
+                _increment_post_count(state)
                 state["posted_ids"] = list(posted_ids)
                 save_state(state)
                 log(f"[OK]   posted, new_x_id={info}")
@@ -386,7 +543,16 @@ def main() -> int:
     # ── 最終的に state を保存
     state["posted_ids"] = list(posted_ids)
     save_state(state)
-    log(f"[INFO] 終了 / 今回の新規投稿: {posts_this_run} 件")
+
+    final_today  = state.get("daily_counts", {}).get(today, 0)
+    final_month  = state.get("monthly_counts", {}).get(this_month, 0)
+    final_cost   = final_month * ESTIMATED_COST_PER_POST_USD
+    log(
+        f"[INFO] 終了 / 今回投稿: {posts_this_run}件 "
+        f"/ 本日累計 {final_today}/{MAX_POSTS_PER_DAY}件 "
+        f"/ 今月累計 {final_month}/{MAX_POSTS_PER_MONTH}件 "
+        f"/ 想定コスト ${final_cost:.2f}/${MONTHLY_BUDGET_USD:.2f}"
+    )
     return 0
 
 
