@@ -50,8 +50,10 @@ MAX_POSTS_PER_MONTH = 200     # 1か月あたりの投稿上限
                               #    月予算$5の範囲内
 MIN_INTERVAL_SEC    = 900     # 投稿と投稿の最小間隔(秒) = 15分（cron間隔と一致）
 
-POSTING_HOUR_START_JST = 6    # 投稿OK開始時刻（JST、0-23の整数）
-POSTING_HOUR_END_JST   = 23   # 投稿OK終了時刻（JST、これ未満ならOK）
+POSTING_HOUR_START_JST = 5    # 投稿OK開始時刻（JST、0-23の整数）
+POSTING_HOUR_END_JST   = 1    # 投稿OK終了時刻（JST、これ未満ならOK）
+                              # ※ START < END なら通常時間帯（例 5-23 → 5:00～22:59）
+                              # ※ START > END なら日をまたぐ（例 5-1 → 5:00～翌0:59）
 
 # ─── URL頻度のコントロール（コスト最適化のキモ）───
 URL_EVERY_N_POSTS = 20        # N回に1回だけ本文にブログURLを入れる
@@ -231,8 +233,17 @@ def can_post_now(state: Dict) -> Tuple[bool, str]:
     """
     now = datetime.now(JST)
 
-    # (1) 時間帯チェック
-    if not (POSTING_HOUR_START_JST <= now.hour < POSTING_HOUR_END_JST):
+    # (1) 時間帯チェック（日跨ぎ対応）
+    #     START < END: 通常時間帯（例 6-23 → 6:00 ≤ hour < 23:00 がOK）
+    #     START > END: 日をまたぐ（例 5-1 → hour ≥ 5 または hour < 1 がOK）
+    #     START == END: 全時間帯NG（あえてこう書けば全停止扱い）
+    if POSTING_HOUR_START_JST < POSTING_HOUR_END_JST:
+        in_window = POSTING_HOUR_START_JST <= now.hour < POSTING_HOUR_END_JST
+    elif POSTING_HOUR_START_JST > POSTING_HOUR_END_JST:
+        in_window = now.hour >= POSTING_HOUR_START_JST or now.hour < POSTING_HOUR_END_JST
+    else:
+        in_window = False  # START==END は全停止
+    if not in_window:
         return False, (
             f"投稿可能時間帯外 (JST {now.hour}:{now.minute:02d}, "
             f"許可: {POSTING_HOUR_START_JST}:00-{POSTING_HOUR_END_JST}:00)"
@@ -624,22 +635,4 @@ def main() -> int:
                     break
 
     # ── 最終的に state を保存
-    state["posted_ids"] = list(posted_ids)
-    save_state(state)
-
-    final_today = state.get("daily_counts", {}).get(today, 0)
-    final_month = state.get("monthly_counts", {}).get(this_month, 0)
-    final_url   = state.get("url_post_counts", {}).get(this_month, 0)
-    final_cost  = _calc_actual_monthly_cost(state)
-    log(
-        f"[INFO] 終了 / 今回投稿: {posts_this_run}件 "
-        f"/ 本日累計 {final_today}/{MAX_POSTS_PER_DAY}件 "
-        f"/ 今月累計 {final_month}/{MAX_POSTS_PER_MONTH}件 "
-        f"(URL付き{final_url}件) "
-        f"/ 実コスト ${final_cost:.3f}/${MONTHLY_BUDGET_USD:.2f}"
-    )
-    return 0
-
-
-if __name__ == "__main__":
-    sys.exit(main())
+    state["posted_ids"] = list(poste
