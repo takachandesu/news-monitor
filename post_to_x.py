@@ -44,9 +44,9 @@ import anthropic
 # ═══════════════════════════════════════════════════════
 
 MAX_POSTS_PER_RUN   = 1       # 1回の実行で投稿する最大件数
-MAX_POSTS_PER_DAY   = 5       # 1日あたりの投稿上限
-MAX_POSTS_PER_MONTH = 140     # 1か月あたりの投稿上限
-                              # ※ URL頻度1/10で 140件 × $0.0335 ≒ $4.69/月
+MAX_POSTS_PER_DAY   = 7       # 1日あたりの投稿上限
+MAX_POSTS_PER_MONTH = 200     # 1か月あたりの投稿上限
+                              # ※ URL頻度1/20で 200件 × $0.0243 ≒ $4.85/月
                               #    月予算$5の範囲内
 MIN_INTERVAL_SEC    = 900     # 投稿と投稿の最小間隔(秒) = 15分（cron間隔と一致）
 
@@ -54,8 +54,8 @@ POSTING_HOUR_START_JST = 6    # 投稿OK開始時刻（JST、0-23の整数）
 POSTING_HOUR_END_JST   = 23   # 投稿OK終了時刻（JST、これ未満ならOK）
 
 # ─── URL頻度のコントロール（コスト最適化のキモ）───
-URL_EVERY_N_POSTS = 10        # N回に1回だけ本文にブログURLを入れる
-                              # 1=毎回、2=半分、3=1/3、5=1/5、10=1/10、999=ほぼ無し
+URL_EVERY_N_POSTS = 20        # N回に1回だけ本文にブログURLを入れる
+                              # 1=毎回、2=半分、3=1/3、5=1/5、10=1/10、20=1/20、999=ほぼ無し
 
 # X API 単価（2026/04/20 改定後の実コスト。Developer Console で要確認）
 COST_PER_URL_POST_USD   = 0.20    # URL付き投稿の単価
@@ -83,6 +83,11 @@ JST = timezone(timedelta(hours=9))
 ACCOUNT_CONFIGS = [
     {
         "handle": "FirstSquawk",
+        "filter": "none",       # 全件通過
+        "translate": True,      # 英語 → 日本語
+    },
+    {
+        "handle": "unusual_whales",
         "filter": "none",       # 全件通過
         "translate": True,      # 英語 → 日本語
     },
