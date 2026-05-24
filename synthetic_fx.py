@@ -295,12 +295,20 @@ _Q_PATTERN = re.compile(
 def _parse_sekai_q_calls(text: str) -> Dict[str, Dict[str, float]]:
     """
     q(count, low, high, offset, samples, 'svg...') の羅列を解析。
-    - offset=0 の行 = 今日のデータ
-    - offset!=0 の行 = 前日比較用(無視)
+
+    観察した構造: q() エントリは「ペア構造」
+      - 1番目 = 通常市場(金曜終値で固定)
+      - 2番目 = サンデー24h CFD/参考値(リアルタイムで動く) ← ユーザーが見たいのはこっち
+
+    戦略:
+      ・銘柄ごとに値域マッチで候補を集める
+      ・同じ銘柄に複数候補があれば 2番目以降(サンデー版)を採用
+      ・候補が1つしかなければそれを採用
+
     返り値: { "dow": {low, high}, "nas100": {...}, "vix": {...} }
     """
-    out: Dict[str, Dict[str, float]] = {}
-    seen: set = set()
+    # 銘柄ごとに、見つかった候補をすべて集める
+    candidates: Dict[str, List[Dict[str, float]]] = {}
 
     for m in _Q_PATTERN.finditer(text):
         try:
@@ -309,23 +317,27 @@ def _parse_sekai_q_calls(text: str) -> Dict[str, Dict[str, float]]:
             offset = int(m.group(4))
         except (ValueError, TypeError):
             continue
-        if offset != 0:        # 今日のデータのみ採用
-            continue
         if not (low > 0 and high > 0 and high >= low):
             continue
 
-        # 銘柄判定（最初にマッチしたものを採用）
         for name, lo, hi in _INSTRUMENT_RANGES:
-            if name in seen:
-                continue
             if lo <= low and high <= hi:
-                out[name] = {"low": low, "high": high}
-                seen.add(name)
+                candidates.setdefault(name, []).append({
+                    "low": low,
+                    "high": high,
+                    "offset": offset,
+                })
                 break
 
-        # 全部見つかったら早期終了
-        if len(seen) >= len(_INSTRUMENT_RANGES):
-            break
+    out: Dict[str, Dict[str, float]] = {}
+    for name, cands in candidates.items():
+        if len(cands) >= 2:
+            # 候補が2つ以上 → 2番目(サンデー版/24h版)を採用
+            chosen = cands[1]
+        else:
+            # 候補1つだけ → それを使う
+            chosen = cands[0]
+        out[name] = {"low": chosen["low"], "high": chosen["high"]}
 
     return out
 
