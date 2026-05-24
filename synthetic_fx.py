@@ -11,6 +11,7 @@
 # - すべて try/except で囲み外に例外を投げない
 from __future__ import annotations
 
+import os
 import re
 import time
 import threading
@@ -198,18 +199,50 @@ def _compute_synth_usdjpy() -> Optional[Dict[str, Any]]:
 # =====================================================
 # (2) sekai-kabuka.com  =  土日ダウ / NASDAQ100 / VIX
 # =====================================================
+SEKAI_LOCAL_URL_FILE = "sekai_data_url.txt"  # GitHub Actions が更新する自動URLファイル
+
+
+def _read_url_from_local_file() -> Optional[str]:
+    """
+    GitHub Actions の Playwright ワーカーが書き出した sekai_data_url.txt から
+    最新URLを読み取る。リポジトリのトップに置かれている前提。
+    """
+    try:
+        if not os.path.exists(SEKAI_LOCAL_URL_FILE):
+            return None
+        with open(SEKAI_LOCAL_URL_FILE, "r", encoding="utf-8") as f:
+            for line in f:
+                s = line.strip()
+                if not s or s.startswith("#"):
+                    continue
+                if s.startswith("http"):
+                    return s
+                if s.startswith("//"):
+                    return "https:" + s
+        return None
+    except Exception:
+        return None
+
+
 def _discover_sekai_data_url() -> Tuple[Optional[str], str]:
     """
     sekai-kabuka.com の最新データURLを取得する。
     優先順位:
-      1) HTML抽出 (一番フレッシュ。ページの<script>から毎回新しいハッシュ付きURLを取り出す)
-      2) Streamlit Secrets の手動URL (フォールバック・固定スナップショット)
-      3) 直前回成功時のURL (キャッシュ)
-    返り値: (URL, "html"/"manual"/"cache"/"none" のラベル)
+      1) sekai_data_url.txt (GitHub Actions + Playwright で自動更新される、最も新鮮)
+      2) HTML抽出 (リポジトリにファイルが無い時のみ試行)
+      3) Streamlit Secrets の手動URL (フォールバック)
+      4) 直前回成功時のURL (キャッシュ)
+    返り値: (URL, "auto"/"html"/"manual"/"cache"/"none" のラベル)
     """
     global _LAST_SEKAI_DATA_URL
 
-    # ── 1) HTML を取得して正規表現抽出 (最優先)
+    # ── 1) リポジトリ内の自動更新ファイル (最優先・最も新鮮)
+    auto_url = _read_url_from_local_file()
+    if auto_url:
+        _LAST_SEKAI_DATA_URL = auto_url
+        return auto_url, "auto"
+
+    # ── 2) HTML を取得して正規表現抽出 (JS生成だと取れないが念のため)
     try:
         r = _safe_get(SEKAI_HOME_URL, headers={
             "Accept": "text/html,application/xhtml+xml",
@@ -235,7 +268,7 @@ def _discover_sekai_data_url() -> Tuple[Optional[str], str]:
     except Exception:
         pass
 
-    # ── 2) Streamlit Secrets の手動URL (フォールバック)
+    # ── 3) Streamlit Secrets の手動URL (フォールバック)
     try:
         manual = st.secrets.get("sekai_kabuka", {}).get("manual_url", "")
         if manual and isinstance(manual, str) and manual.strip():
@@ -246,7 +279,7 @@ def _discover_sekai_data_url() -> Tuple[Optional[str], str]:
     except Exception:
         pass
 
-    # ── 3) 前回成功URL (最終フォールバック)
+    # ── 4) 前回成功URL (最終フォールバック)
     if _LAST_SEKAI_DATA_URL:
         return _LAST_SEKAI_DATA_URL, "cache"
 
@@ -729,14 +762,16 @@ def render_synthetic_fx(data: Dict[str, Any]) -> None:
     sekai_url_source = data.get("sekai_url_source", "n/a")
     # データソースのバッジ (色分けで状態が一目で分かる)
     src_color = {
-        "html":   "#2e7d32",  # 緑: 最新URL取得成功
-        "manual": "#ef6c00",  # オレンジ: 手動URL使用中(古いかも)
+        "auto":   "#1565c0",  # 青: GitHub Actionsで自動取得した最新URL (最良)
+        "html":   "#2e7d32",  # 緑: ページHTMLから直接抽出 (次に良い)
+        "manual": "#ef6c00",  # オレンジ: 手動URL使用中(古い可能性)
         "cache":  "#c62828",  # 赤: 前回URL再利用(かなり古い可能性)
         "none":   "#9e9e9e",  # グレー: 未取得
         "n/a":    "#9e9e9e",
     }.get(sekai_url_source, "#9e9e9e")
     src_label = {
-        "html":   "最新",
+        "auto":   "🔄 自動更新",
+        "html":   "HTML抽出",
         "manual": "手動URL",
         "cache":  "古い",
         "none":   "未取得",
