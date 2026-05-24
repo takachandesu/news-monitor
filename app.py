@@ -2798,13 +2798,13 @@ _charts_html = """
       overflow: hidden;
   }
   #tv-charts-wrap .tv-label {
-      font-size: clamp(11px, 1.6vw, 14px);
-      font-weight: 700;
-      color: #f5b400;
-      text-shadow:
-          0 0 2px rgba(0,0,0,0.6),
-          1px 1px 2px rgba(0,0,0,0.4);
-      margin: 0 0 2px 2px;
+      font-size: clamp(13px, 1.8vw, 16px);
+      font-weight: 800;
+      color: #111;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI",
+        "Hiragino Kaku Gothic ProN", "Yu Gothic UI", "Meiryo", sans-serif;
+      letter-spacing: 0.2px;
+      margin: 0 0 4px 2px;
       white-space: nowrap;
       overflow: hidden;
       text-overflow: ellipsis;
