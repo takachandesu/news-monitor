@@ -314,114 +314,130 @@ _Q_PATTERN = re.compile(
 
 def _extract_current_from_annotation(segment: str, low: float, high: float) -> Optional[float]:
     """
-    [新規・主要手法]
-    q() 引数の末尾には現在値・前日比などを含む注釈テキスト(引数7番目以降)が
-    入っていることが観察されている (引き継ぎ書 6-2 B案: 'コウイ-557й699.5' 等)。
-    SVG座標は通常 0〜1000 程度の小さな値なので、銘柄の価格レンジ近傍の数字を
-    拾えば「ほぼ確実に現在値マーカー」になる。
+    [改訂版・主要手法]
+    q() 引数の末尾には現在値・前日比などを含む注釈テキストが入っているが、
+    同時に「チャート軸ラベル(low/high/中間値)」もデータに含まれているので
+    単純に「レンジ内の最後の数字」を取ると軸ラベルを拾ってしまう (旧版バグ:
+    ダウ・NASでlow値そのものを返していた)。
 
-    戦略: セグメント内のすべての浮動小数点数のうち、[low*0.97, high*1.08] に
-    入るものを集め、その「最後」を採用する (テキストの後方ほど新鮮な可能性が高い)。
-
-    レンジを上に少し広めに取るのは、リアルタイム値が日中レンジの high を
-    超えて動くことを許容するため (引き継ぎ書のダウ・NAS で観測された現象)。
-    下も少し狭く(0.97)取るのは、SVG座標 ≒ low に誤マッチするのを避けるため。
+    厳格化された戦略:
+      1) [low*0.97, high*1.08] 内の数値だけ候補にする
+      2) low/high と一致(±0.5)するものは除外 (軸の上下端ラベル)
+      3) 「丸い整数」(50/100/500/1000の倍数の整数値) も除外 (中間軸ラベル例:50500)
+      4) 残った候補のうち、「小数点ありの値」を最優先 (現在値は通常 50943.45 のように細かい)
+      5) どれも無ければ最初の候補を返す
+      6) 全部弾かれたら None を返し、呼び出し側はSVG抽出にフォールバック
     """
     try:
-        # high が小さい銘柄(VIX等) ではこの手法は信頼度が低い: 一桁の数値が大量に
-        # 含まれるSVG座標と price レンジが重なってしまい誤検出するため
         if high < 100:
+            # 小型銘柄(VIX等) は SVG座標と価格レンジが重なり誤検出するので
+            # この手法は使わない
             return None
 
         lo_th = low * 0.97
         hi_th = high * 1.08
+
+        def _is_axis_label(v: float) -> bool:
+            """軸ラベルらしいかを判定"""
+            # low/high ぴったり
+            if abs(v - low) < 0.5 or abs(v - high) < 0.5:
+                return True
+            # 整数で、かつ 50/100/500/1000 の倍数 (中間軸ラベルにありがち)
+            if v == int(v):
+                iv = int(v)
+                if iv % 500 == 0 or iv % 1000 == 0:
+                    return True
+                # 100の倍数 は範囲が広い銘柄(ダウ等)では軸ラベル候補が多い
+                if high > 1000 and iv % 100 == 0:
+                    return True
+            return False
+
         nums = re.findall(r'\d+\.?\d*', segment)
-        last_match: Optional[float] = None
+        candidates: List[float] = []
         for n in nums:
             try:
                 v = float(n)
             except ValueError:
                 continue
-            if lo_th <= v <= hi_th:
-                last_match = v
-        return last_match
+            if not (lo_th <= v <= hi_th):
+                continue
+            if _is_axis_label(v):
+                continue
+            candidates.append(v)
+
+        if not candidates:
+            return None
+
+        # 小数点ありの値があれば最優先 (現在値は通常 .XX 付き)
+        with_decimal = [v for v in candidates if v != int(v)]
+        if with_decimal:
+            return with_decimal[0]
+
+        # 全部整数なら最初の候補を返す
+        return candidates[0]
     except Exception:
         return None
 
 
 def _extract_current_from_svg(svg_text: str, low: float, high: float) -> Optional[float]:
     """
-    [改良版・補助手法]
+    [補助手法・元のロジックに戻した版]
     SVGパス文字列から「最後の点のY座標」を取り出して現在値を逆算する。
 
-    旧版の問題:
-      - svg_text 内の最初の 'M' しか試さなかった (q() 引数 'M' 始まりでない別文字列
-        を踏むと誤抽出)
-      - 'L'/'H'/'V' などのサブコマンド位置で path_data を打ち切るため、明示的に
-        L コマンドを使うパスでは2点しか拾えなかった
+    旧版で動いていた挙動を尊重:
+      - 最初の 'M' のみを使う (複数Mを試すと、軸目盛り用の短いパスを選んで
+        しまうことがあった)
+      - 'L'/'H'/'V' などのサブコマンドで path_data を打ち切る (sekai-kabuka は
+        実装上 implicit-L 形式と思われるのでこれで全座標が取れる)
 
-    改良:
-      - すべての 'M' 位置を試行し、最も多くの数値が取れた候補を採用
-      - path_data の取り方を「引用符 ')' まで」に変更し、L/H/V等のサブコマンドは
-        境界として扱わず、全座標を吸い上げる (数値抽出時に文字は無視されるので問題なし)
+    変更点 (改良として残すもの):
       - サニティを ±5% → ±15% に緩和 (リアルタイム値が日中レンジを超えることがある)
     """
     try:
-        margin = (high - low) * 0.15 if high > low else 0
-        sanity_lo = low - margin
-        sanity_hi = high + margin
-
-        # すべての 'M' 位置を試す
-        m_positions = [i for i, ch in enumerate(svg_text) if ch == 'M']
-        if not m_positions:
+        m_pos = svg_text.find('M')
+        if m_pos < 0:
             return None
 
-        best: Optional[float] = None
-        best_pts = 0
+        rest = svg_text[m_pos + 1:]
 
-        for m_pos in m_positions:
-            rest = svg_text[m_pos + 1:]
+        # 次のSVGパスコマンド(または引用符) までを切り取り
+        end = len(rest)
+        for ch in ('H', 'V', 'Z', 'L', 'C', 'S', 'Q', 'T', 'A',
+                   'h', 'v', 'z', 'l', 'c', 's', 'q', 't', 'a',
+                   '"', "'", ')'):
+            idx = rest.find(ch)
+            if 0 < idx < end:
+                end = idx
+        path_data = rest[:end]
 
-            # path_data の終端: 引用符・閉じカッコまで (サブコマンドは境界にしない)
-            end = len(rest)
-            for ch in ('"', "'", ')', ';'):
-                idx = rest.find(ch)
-                if 0 < idx < end:
-                    end = idx
-            path_data = rest[:end]
+        nums = re.findall(r'\d+\.?\d*', path_data)
+        if len(nums) < 4:
+            return None
 
-            # 区切り文字に依存せず、すべての浮動小数点数を抽出
-            nums = re.findall(r'\d+\.?\d*', path_data)
-            if len(nums) < 4:
-                continue
-            try:
-                values = [float(n) for n in nums]
-            except ValueError:
-                continue
+        try:
+            values = [float(n) for n in nums]
+        except ValueError:
+            return None
 
-            ys = values[1::2]
-            if len(ys) < 2:
-                continue
+        ys = values[1::2]
+        if len(ys) < 2:
+            return None
 
-            last_y = ys[-1]
-            y_min = min(ys)
-            y_max = max(ys)
-            if y_max == y_min:
-                continue
+        last_y = ys[-1]
+        y_min = min(ys)
+        y_max = max(ys)
+        if y_max == y_min:
+            return None
 
-            # 線形補間: y_min(画面上部)=high, y_max(画面下部)=low
-            fraction = (last_y - y_min) / (y_max - y_min)   # 0.0〜1.0
-            current = high - fraction * (high - low)
+        # 線形補間: y_min(画面上部)=high, y_max(画面下部)=low
+        fraction = (last_y - y_min) / (y_max - y_min)
+        current = high - fraction * (high - low)
 
-            if not (sanity_lo <= current <= sanity_hi):
-                continue
-
-            # 点数が多い解釈を優先 (本物のSVGパスは点が多いはず)
-            if len(ys) > best_pts:
-                best = current
-                best_pts = len(ys)
-
-        return best
+        # サニティチェック: ±15% に緩和 (リアルタイム値が日中レンジを超えるケース対応)
+        margin = (high - low) * 0.15
+        if not (low - margin <= current <= high + margin):
+            return None
+        return current
     except Exception:
         return None
 
