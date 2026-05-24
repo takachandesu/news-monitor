@@ -110,24 +110,31 @@ def parse_indices_from_body_text(body_text: str):
     # 専用ラベルが見つかれば最初の出現を、汎用ラベルだけなら最後の出現を採用
     INSTRUMENT_LABELS = {
         "dow": {
-            "specific": ["サンデーダウ", "サンデーDOW"],
+            "specific": ["サンデーダウ", "サンデーDOW", "ダウ サンデー"],
             "generic":  ["ダウ平均", "ダウ・ジョーンズ"],
         },
         "nas100": {
-            "specific": ["サンデーNASDAQ", "サンデーNAS"],
+            "specific": ["サンデーNASDAQ", "サンデーNAS", "NASDAQ サンデー", "NASDAQ100 サンデー"],
             "generic":  ["NASDAQ100", "NASDAQ"],
         },
         "oil": {
-            "specific": ["サンデー原油", "サンデーWTI"],
-            "generic":  ["原油 CFD", "WTI原油"],
+            "specific": [
+                "サンデー原油", "サンデーWTI", "原油 CFD", "原油CFD",
+                "WTI原油", "WTI CFD", "WTI 24h", "原油 24h"
+            ],
+            "generic":  ["原油", "WTI"],
         },
         "gold": {
-            "specific": ["サンデーゴールド", "サンデー金"],
-            "generic":  ["ゴールド", "金先物"],
+            "specific": ["サンデーゴールド", "サンデー金", "ゴールド CFD"],
+            "generic":  ["ゴールド", "金先物", "GOLD"],
         },
         "vix": {
-            "specific": ["VIX 24時間比", "VIX24時間", "サンデーVIX"],
-            "generic":  ["VIX"],
+            "specific": [
+                "VIX 24時間比", "VIX24時間比", "VIX 24時間", "VIX24時間",
+                "24時間VIX", "サンデーVIX", "VIX (24h)", "VIX(24h)",
+                "恐怖指数 24h", "VIX 24h"
+            ],
+            "generic":  ["VIX", "恐怖指数"],
         },
     }
 
@@ -329,17 +336,31 @@ def update_indices_file(body_text):
 
     print(f"\n[info] Parsing indices from body text ({len(body_text)} chars)...", file=sys.stderr)
 
-    # デバッグ用: 最初の500文字を出力 (どんなテキストが取れたか確認)
-    snippet = body_text[:500].replace("\n", " | ")
-    print(f"[info] Body text snippet: {snippet[:300]}", file=sys.stderr)
+    # ★ デバッグ: body_text 全文(改行を | に変換して見やすく) を 2000文字まで出力
+    cleaned = body_text.replace("\n", " | ")
+    print(f"[debug] FULL body text (first 2000 chars):", file=sys.stderr)
+    for i in range(0, min(len(cleaned), 2000), 500):
+        print(f"  {cleaned[i:i+500]}", file=sys.stderr)
+
+    # ★ デバッグ: 主要キーワードを含む行を抜き出して表示
+    print(f"[debug] tokens containing keywords:", file=sys.stderr)
+    keywords = ["原油", "WTI", "ゴールド", "金", "VIX", "恐怖", "サンデー"]
+    tokens = []
+    for raw_line in body_text.split("\n"):
+        for piece in raw_line.split("|"):
+            piece = piece.strip()
+            if piece:
+                tokens.append(piece)
+    for kw in keywords:
+        matching = [(i, t) for i, t in enumerate(tokens) if kw in t]
+        if matching:
+            print(f"  [{kw}]:", file=sys.stderr)
+            for i, t in matching[:5]:  # 最大5件
+                print(f"    [{i}] {t[:80]}", file=sys.stderr)
 
     indices = parse_indices_from_body_text(body_text)
     if not indices:
         print("[warn] No instruments matched in body text", file=sys.stderr)
-        # サンプルとして "サンデー" を含む行だけダンプしておく
-        for line in body_text.split("\n"):
-            if "サンデー" in line or "VIX" in line:
-                print(f"  candidate line: {line.strip()[:80]}", file=sys.stderr)
         return False
 
     print(f"[info] Extracted indices: {indices}", file=sys.stderr)
