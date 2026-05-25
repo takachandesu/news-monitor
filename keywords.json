@@ -1,77 +1,24 @@
 {
-  "updated_at": 1779708536,
-  "updated_at_jst": "2026-05-25 20:28:56 JST",
+  "updated_at": 1779709214,
+  "updated_at_jst": "2026-05-25 20:40:14 JST",
   "handle": "moo_stock",
   "threshold": 200,
   "stats": {
-    "total_tweets_fetched": 174,
-    "popular_tweets_count": 15,
+    "total_tweets_fetched": 175,
+    "removed_replies": 65,
+    "removed_duplicates": 20,
+    "cleaned_tweets_count": 90,
+    "popular_tweets_count": 10,
     "impression_unavailable_count": 0,
     "analysis_days": 90
   },
   "keywords": [
     {
-      "word": "先物",
-      "count": 15
-    },
-    {
-      "word": "ロング",
-      "count": 15
-    },
-    {
       "word": "イラン",
       "count": 13
     },
     {
-      "word": "コール",
-      "count": 10
-    },
-    {
-      "word": "sp",
-      "count": 10
-    },
-    {
-      "word": "アセマネ",
-      "count": 10
-    },
-    {
       "word": "パキスタン",
-      "count": 5
-    },
-    {
-      "word": "himagyo",
-      "count": 5
-    },
-    {
-      "word": "買い",
-      "count": 5
-    },
-    {
-      "word": "ディーラー",
-      "count": 5
-    },
-    {
-      "word": "歴史",
-      "count": 5
-    },
-    {
-      "word": "高水準",
-      "count": 5
-    },
-    {
-      "word": "ナスダック",
-      "count": 5
-    },
-    {
-      "word": "主体",
-      "count": 5
-    },
-    {
-      "word": "解消",
-      "count": 5
-    },
-    {
-      "word": "ポジション",
       "count": 5
     },
     {
@@ -89,6 +36,62 @@
     {
       "word": "参謀",
       "count": 3
+    },
+    {
+      "word": "国会",
+      "count": 2
+    },
+    {
+      "word": "交渉",
+      "count": 2
+    },
+    {
+      "word": "権利",
+      "count": 2
+    },
+    {
+      "word": "言及",
+      "count": 2
+    },
+    {
+      "word": "テヘラン",
+      "count": 2
+    },
+    {
+      "word": "大統領",
+      "count": 2
+    },
+    {
+      "word": "メディア",
+      "count": 2
+    },
+    {
+      "word": "仲介",
+      "count": 2
+    },
+    {
+      "word": "via",
+      "count": 2
+    },
+    {
+      "word": "FirstSquawk",
+      "count": 2
+    },
+    {
+      "word": "ーー",
+      "count": 2
+    },
+    {
+      "word": "中国",
+      "count": 1
+    },
+    {
+      "word": "インド",
+      "count": 1
+    },
+    {
+      "word": "協力",
+      "count": 1
     }
   ]
 }
