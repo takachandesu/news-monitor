@@ -2711,16 +2711,16 @@ st.markdown("<hr />", unsafe_allow_html=True)
 #   NQ=F  = CME E-mini NASDAQ-100 Futures (USD建て、ほぼ24h)
 #   JPY=X = USD/JPY スポット (24h)
 _CHART_SPECS = [
-    ("日経平均(24h CFD)",     "OANDA:JP225USD",     "overview", "^N225,NKD=F,NIY=F"),     # 東証現物→CME USD先物→円先物
-    ("NASDAQ100(24h CFD)",    "OANDA:NAS100USD",    "overview", "NQ=F,^NDX,^IXIC"),       # CME NASDAQ先物→現物→Composite
-    ("ドル円",                "FX:USDJPY",          "overview", "USDJPY=X,JPY=X"),        # USD/JPY
+    ("日経平均(24h CFD)",     "OANDA:JP225USD",     "overview", "^N225,NKD=F,NIY=F"),               # 東証現物→CME USD先物→円先物
+    ("NASDAQ100(24h CFD)",    "OANDA:NAS100USD",    "overview", "NQ=F,MNQ=F,^NDX,^IXIC"),           # CME NASDAQ先物→Micro→現物→Composite
+    ("ドル円",                "FX:USDJPY",          "overview", "USDJPY=X,JPY=X"),                  # USD/JPY
 ]
 
 
 _PCT_CACHE: Dict[str, Tuple[float, Optional[str], Optional[str], Optional[str]]] = {}
 _PCT_CACHE_TTL_SEC = 120   # 2分 (短くして古いキャッシュを残さない)
 _PCT_STALE_TTL_SEC = 3600  # 1時間: フェッチ全失敗時に古いキャッシュを使う上限
-_PCT_CACHE_VERSION = "v3"   # ← ロジック変更時にインクリメントして古いキャッシュ無効化
+_PCT_CACHE_VERSION = "v4"   # ← ロジック変更時にインクリメントして古いキャッシュ無効化 (v4: CME直接APIを最優先に)
 
 # Stooq へのティッカーマッピング
 _STOOQ_MAP = {
@@ -2728,10 +2728,27 @@ _STOOQ_MAP = {
     "NKD=F":    "nkd.f",
     "NIY=F":    "niy.f",
     "NQ=F":     "nq.f",       # CME E-mini NASDAQ-100
+    "MNQ=F":    "nq.f",       # ※stooqにMicroは無いのでNQで代用 (同じ値動き)
     "^NDX":     "^ndx",       # NASDAQ-100 現物
     "^IXIC":    "^ixic",      # NASDAQ Composite
     "USDJPY=X": "usdjpy",
     "JPY=X":    "usdjpy",
+}
+
+
+# ★ NEW (v4): CME Group 公開API のプロダクトIDマッピング
+# CMEは自社の delayed quote 用に公開のJSON APIを提供している:
+#   https://www.cmegroup.com/CmeWS/mvc/Quotes/Future/{productId}/{venue}
+# venue "G" = Globex (electronic, ほぼ24時間取引)
+# レスポンスの quotes[0] = front-month (最も活発な限月)。
+# 各quote: { code, last, change, percentageChange, priorSettle, volume, ... }
+# Yahoo の NQ=F が祝日にstale化する問題を回避するため、futures系は CME を最優先で叩く。
+_CME_PRODUCT_IDS = {
+    "NQ=F":  ("8074", "G"),   # E-mini NASDAQ-100
+    "MNQ=F": ("8920", "G"),   # Micro E-mini NASDAQ-100
+    "NKD=F": ("249",  "G"),   # Nikkei 225 USD (CME)
+    "NIY=F": ("250",  "G"),   # Nikkei 225 Yen (CME)
+    "ES=F":  ("133",  "G"),   # E-mini S&P 500
 }
 
 
@@ -2751,6 +2768,72 @@ def _http_get_with_ua(url: str, timeout: int = 6):
     except Exception:
         pass
     return None
+
+
+def _fetch_cme_quote(yahoo_ticker: str):
+    """★ NEW (v4): CME Group 公開API から先物の (last, prior_settle) を取得。
+
+    CME本家サイト (https://www.cmegroup.com/markets/equities.html) が表示している
+    値そのもの (Globex 取引中の最新値 + 前営業日settlement) を返す。
+    本家サイトと完全に整合するため、futures系はこれが最優先ソース。
+
+    祝日 (Memorial Day等) でも Globex は稼働しているため、Yahooがstale化しても
+    CMEは正常に値を返す。
+
+    返り値: (last, prior_settle) or (None, None)
+    """
+    info = _CME_PRODUCT_IDS.get(yahoo_ticker)
+    if not info:
+        return None, None
+    product_id, venue = info
+    try:
+        url = f"https://www.cmegroup.com/CmeWS/mvc/Quotes/Future/{product_id}/{venue}"
+        r = _http_get_with_ua(url, timeout=6)
+        if r is None:
+            return None, None
+        data = r.json()
+        quotes = data.get("quotes") or []
+        if not quotes:
+            return None, None
+
+        def _parse_num(v):
+            """CMEの数値文字列をパース ("29,930.75" → 29930.75)"""
+            if v is None:
+                return None
+            if isinstance(v, (int, float)):
+                return float(v)
+            if not isinstance(v, str):
+                return None
+            s = v.replace(",", "").replace("+", "").strip()
+            if s in ("", "-", "—", "NA"):
+                return None
+            try:
+                return float(s)
+            except ValueError:
+                return None
+
+        # quotes[0] = front-month (CMEの並びは出来高優先で、通常は最も活発な限月が先頭)
+        # ただし "last" が "-" のケースもあるので、有効な値を持つ最初の限月を採用
+        for q in quotes:
+            last = (
+                _parse_num(q.get("last"))
+                or _parse_num(q.get("lastTradedPrice"))
+                or _parse_num(q.get("close"))
+            )
+            prev = (
+                _parse_num(q.get("priorSettle"))
+                or _parse_num(q.get("previousSettle"))
+            )
+            # 'last' が取れない場合は priorSettle + change から逆算を試みる
+            if last is None and prev is not None:
+                ch = _parse_num(q.get("change"))
+                if ch is not None:
+                    last = prev + ch
+            if last is not None and prev is not None and last > 0 and prev > 0:
+                return last, prev
+        return None, None
+    except Exception:
+        return None, None
 
 
 def _fetch_yahoo_direct(ticker: str):
@@ -2844,12 +2927,13 @@ def _calc_prev_close_pct(yahoo_ticker: str):
     """前営業日終値、現在値、変化率を取得。
     複数データソースを試行してプライス表示を最優先する。
 
-    取得経路 (順番):
-      ① yfinance.fast_info  (ライブラリ経由・高速)
-      ② yfinance.history    (ライブラリ経由・標準)
-      ③ Yahoo Direct API    (HTTP直接・ライブラリ非依存)
-      ④ stooq.com           (HTTP直接・別ソース)
-      ⑤ 古いキャッシュ (TTL内なら採用)
+    取得経路 (v4・各ティッカーごとに順番にトライ):
+      ⓪ CME Group 公開API    (futures only・本家サイトと完全整合、最優先)
+      ① Yahoo Direct API     (HTTP直接・ライブラリ非依存)
+      ② yfinance.fast_info   (ライブラリ経由・リアルタイム値)
+      ③ stooq.com            (HTTP直接・別ソース)
+      ④ yfinance.history     (日足・最後の手段)
+      ⑤ 古いキャッシュ         (StaleTTL内なら採用)
 
     返り値: (price_str, pct_str, color) or (None, None, None)
     """
@@ -2879,6 +2963,17 @@ def _calc_prev_close_pct(yahoo_ticker: str):
     tickers = [t.strip() for t in yahoo_ticker.split(",") if t.strip()]
 
     for tk in tickers:
+        # ★★ ⓪ CME Group 公開API (futures only, 本家サイトと完全整合)
+        # cmegroup.com の公式ページが表示している値そのものを返す。
+        # Memorial Day等の米国祝日でも Globex 取引中なら確実に最新値を返す。
+        # _CME_PRODUCT_IDS に登録のないティッカー(^N225, USDJPY=X等)は
+        # (None, None) が返るので何もせず次に進む。
+        last_close, prev_close = _fetch_cme_quote(tk)
+        if last_close and prev_close and prev_close > 0:
+            price_str, pct_str, color = _format_result(last_close, prev_close)
+            _PCT_CACHE[cache_key] = (now_ts, price_str, pct_str, color)
+            return price_str, pct_str, color
+
         # ★ ① Yahoo Direct API (v8 chart の meta.regularMarketPrice = リアルタイム値)
         # これが最も信頼できる。取引中の最新値を返す。
         last_close, prev_close = _fetch_yahoo_direct(tk)
