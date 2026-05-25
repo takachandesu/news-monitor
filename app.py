@@ -2719,7 +2719,7 @@ def _tv_widget_block(symbol: str, kind: str = "mini", color_theme: str = "light"
     """
     if kind == "overview":
         cfg = {
-            "symbols": [[symbol + "|1D"]],
+            "symbols": [[symbol + "|5D"]],   # 1日 → 5日 に変更（祝日でも前営業日からの動きが見える）
             "chartOnly": True,
             "width": "100%",
             "height": "220",
@@ -2729,7 +2729,7 @@ def _tv_widget_block(symbol: str, kind: str = "mini", color_theme: str = "light"
             "autosize": False,
             "showVolume": False,
             "showMA": False,
-            "hideDateRanges": True,
+            "hideDateRanges": False,         # 期間切替ボタンを表示（1D/1M/3M/12M)
             "hideMarketStatus": True,
             "hideSymbolLogo": True,
             "scalePosition": "right",
