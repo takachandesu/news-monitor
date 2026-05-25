@@ -2704,11 +2704,40 @@ st.markdown("<hr />", unsafe_allow_html=True)
 #   NASDAQ100先物:    "FOREXCOM:NAS100"  → "FX:NAS100" / "CAPITALCOM:US100" /
 #                                          "OANDA:NAS100USD" / "NASDAQ:NDX" (US時間のみ)
 #   ドル円:           "FX:USDJPY"        → "OANDA:USDJPY" / "FX_IDC:USDJPY"
+#
+# 各エントリ: (表示ラベル, TradingViewシンボル, ウィジェット種別, Yahoo Tickerで前営業日比計算)
+# Yahoo Ticker: ^N225/^NDX (現物=休場日は動かない) ではなく CME先物 (≒24h動く) を採用
 _CHART_SPECS = [
-    ("日経平均（24h CFD）",   "OANDA:JP225USD",     "overview"),  # 日本株価指数（CFD、ほぼ24h リアルタイム）
-    ("NASDAQ100（24h CFD）",  "OANDA:NAS100USD",    "overview"),  # 米ハイテク株指数CFD（24h、土日も動く）
-    ("ドル円",                "FX:USDJPY",          "overview"),  # USD/JPY
+    ("日経平均(24h CFD)",     "OANDA:JP225USD",     "overview", "NKD=F"),   # CME Nikkei225 USD先物 (≒24h)
+    ("NASDAQ100(24h CFD)",    "OANDA:NAS100USD",    "overview", "NQ=F"),    # CME E-mini NASDAQ-100先物 (≒24h)
+    ("ドル円",                "FX:USDJPY",          "overview", "JPY=X"),   # FX (24h)
 ]
+
+
+def _calc_prev_close_pct(yahoo_ticker: str):
+    """Yahoo Finance から前営業日終値と現在値の比率を計算。
+    返り値: (pct_str, color) or (None, None)。
+
+    例: ("+3.03%", "#16a34a") 緑色プラス / ("-0.25%", "#dc2626") 赤色マイナス
+    """
+    try:
+        import yfinance as yf
+        ticker = yf.Ticker(yahoo_ticker)
+        hist = ticker.history(period="7d", interval="1d", auto_adjust=False)
+        if hist is None or len(hist) < 2:
+            return None, None
+        # 最新の終値
+        close_today = float(hist["Close"].iloc[-1])
+        # 前営業日(最新の1つ前)の終値
+        close_prev = float(hist["Close"].iloc[-2])
+        if close_prev == 0 or close_today == 0:
+            return None, None
+        pct = (close_today - close_prev) / close_prev * 100.0
+        sign = "+" if pct >= 0 else ""
+        color = "#16a34a" if pct >= 0 else "#dc2626"   # 緑/赤
+        return f"{sign}{pct:.2f}%", color
+    except Exception:
+        return None, None
 
 
 def _tv_widget_block(symbol: str, kind: str = "mini", color_theme: str = "light") -> str:
@@ -2719,7 +2748,7 @@ def _tv_widget_block(symbol: str, kind: str = "mini", color_theme: str = "light"
     """
     if kind == "overview":
         cfg = {
-            "symbols": [[symbol + "|5D"]],   # 1日 → 5日 に変更（祝日でも前営業日からの動きが見える）
+            "symbols": [[symbol + "|12M"]],  # 12ヶ月表示（祝日でも過去1年の値動きが見える）
             "chartOnly": True,
             "width": "100%",
             "height": "220",
@@ -2763,15 +2792,22 @@ def _tv_widget_block(symbol: str, kind: str = "mini", color_theme: str = "light"
     )
 
 
-# ★ チャート3つを横並び表示。テーマ自動切替＋黄色ラベル。
+# ★ チャート3つを横並び表示。テーマ自動切替＋ラベル＋前営業日比%バッジ。
+def _build_chart_payload(label, sym, kind, yahoo_ticker):
+    """各チャートのpayloadを構築。前営業日比%もラベル横に含める"""
+    pct_str, pct_color = _calc_prev_close_pct(yahoo_ticker)
+    return {
+        "label": label,
+        "pct": pct_str,            # 例: "+3.03%" or None
+        "pct_color": pct_color,    # "#16a34a" / "#dc2626" or None
+        "light_html": _tv_widget_block(sym, kind, color_theme="light"),
+        "dark_html":  _tv_widget_block(sym, kind, color_theme="dark"),
+    }
+
 _chart_payloads_json = json.dumps(
     [
-        {
-            "label": label,
-            "light_html": _tv_widget_block(sym, kind, color_theme="light"),
-            "dark_html":  _tv_widget_block(sym, kind, color_theme="dark"),
-        }
-        for label, sym, kind in _CHART_SPECS
+        _build_chart_payload(label, sym, kind, yahoo)
+        for label, sym, kind, yahoo in _CHART_SPECS
     ],
     ensure_ascii=False,
 )
@@ -2841,7 +2877,28 @@ _charts_html = """
 
         const label = document.createElement('div');
         label.className = 'tv-label';
-        label.textContent = p.label;
+        // ラベル本体
+        const labelText = document.createElement('span');
+        labelText.textContent = p.label;
+        label.appendChild(labelText);
+        // 前営業日比%バッジ
+        if (p.pct) {
+            const pctBadge = document.createElement('span');
+            pctBadge.textContent = p.pct;
+            pctBadge.style.cssText = (
+                'display:inline-block;'
+                + 'margin-left:6px;'
+                + 'padding:1px 6px;'
+                + 'border-radius:4px;'
+                + 'background:' + (p.pct_color || '#666') + ';'
+                + 'color:#fff;'
+                + 'font-size:11px;'
+                + 'font-weight:700;'
+                + 'vertical-align:middle;'
+            );
+            pctBadge.title = '前営業日比';
+            label.appendChild(pctBadge);
+        }
         col.appendChild(label);
 
         const holder = document.createElement('div');
