@@ -44,20 +44,22 @@ import anthropic
 # ═══════════════════════════════════════════════════════
 
 MAX_POSTS_PER_RUN   = 1       # 1回の実行で投稿する最大件数
-MAX_POSTS_PER_DAY   = 7       # 1日あたりの投稿上限
-MAX_POSTS_PER_MONTH = 200     # 1か月あたりの投稿上限
-                              # ※ URL頻度1/20で 200件 × $0.0243 ≒ $4.85/月
-                              #    月予算$5の範囲内
+MAX_POSTS_PER_DAY   = 5       # 1日あたりの投稿上限
+MAX_POSTS_PER_MONTH = 140     # 1か月あたりの投稿上限
+                              # ※ 2026/05/25 変更: 全投稿URLなしのため、
+                              #    140件 × $0.015 = $2.10/月 (予算$5の42%)
+                              #    余裕あるが上限はそのまま140件で運用
 MIN_INTERVAL_SEC    = 900     # 投稿と投稿の最小間隔(秒) = 15分（cron間隔と一致）
 
-POSTING_HOUR_START_JST = 5    # 投稿OK開始時刻（JST、0-23の整数）
-POSTING_HOUR_END_JST   = 1    # 投稿OK終了時刻（JST、これ未満ならOK）
-                              # ※ START < END なら通常時間帯（例 5-23 → 5:00～22:59）
-                              # ※ START > END なら日をまたぐ（例 5-1 → 5:00～翌0:59）
+POSTING_HOUR_START_JST = 6    # 投稿OK開始時刻（JST、0-23の整数）
+POSTING_HOUR_END_JST   = 23   # 投稿OK終了時刻（JST、これ未満ならOK）
 
 # ─── URL頻度のコントロール（コスト最適化のキモ）───
-URL_EVERY_N_POSTS = 20        # N回に1回だけ本文にブログURLを入れる
-                              # 1=毎回、2=半分、3=1/3、5=1/5、10=1/10、20=1/20、999=ほぼ無し
+URL_EVERY_N_POSTS = 999       # ★ 2026/05/25 変更: 全投稿URLなし に変更
+                              # 旧: 10 (1/10 にURL付き) → 新: 999 (実質URLなし)
+                              # ※ should_include_url() で強制的に False を返すように
+                              #   実装側で固定。この設定値はコスト計算用にのみ使用。
+                              # 1=毎回、2=半分、3=1/3、5=1/5、10=1/10、999=ほぼ無し
 
 # X API 単価（2026/04/20 改定後の実コスト。Developer Console で要確認）
 COST_PER_URL_POST_USD   = 0.20    # URL付き投稿の単価
@@ -85,11 +87,6 @@ JST = timezone(timedelta(hours=9))
 ACCOUNT_CONFIGS = [
     {
         "handle": "FirstSquawk",
-        "filter": "none",       # 全件通過
-        "translate": True,      # 英語 → 日本語
-    },
-    {
-        "handle": "unusual_whales",
         "filter": "none",       # 全件通過
         "translate": True,      # 英語 → 日本語
     },
@@ -233,17 +230,8 @@ def can_post_now(state: Dict) -> Tuple[bool, str]:
     """
     now = datetime.now(JST)
 
-    # (1) 時間帯チェック（日跨ぎ対応）
-    #     START < END: 通常時間帯（例 6-23 → 6:00 ≤ hour < 23:00 がOK）
-    #     START > END: 日をまたぐ（例 5-1 → hour ≥ 5 または hour < 1 がOK）
-    #     START == END: 全時間帯NG（あえてこう書けば全停止扱い）
-    if POSTING_HOUR_START_JST < POSTING_HOUR_END_JST:
-        in_window = POSTING_HOUR_START_JST <= now.hour < POSTING_HOUR_END_JST
-    elif POSTING_HOUR_START_JST > POSTING_HOUR_END_JST:
-        in_window = now.hour >= POSTING_HOUR_START_JST or now.hour < POSTING_HOUR_END_JST
-    else:
-        in_window = False  # START==END は全停止
-    if not in_window:
+    # (1) 時間帯チェック
+    if not (POSTING_HOUR_START_JST <= now.hour < POSTING_HOUR_END_JST):
         return False, (
             f"投稿可能時間帯外 (JST {now.hour}:{now.minute:02d}, "
             f"許可: {POSTING_HOUR_START_JST}:00-{POSTING_HOUR_END_JST}:00)"
@@ -261,12 +249,12 @@ def can_post_now(state: Dict) -> Tuple[bool, str]:
     if month_count >= MAX_POSTS_PER_MONTH:
         return False, f"今月({this_month})の上限{MAX_POSTS_PER_MONTH}件に到達({month_count}件投稿済)"
 
-    # (4) 月予算チェック（実コスト + 次の1投稿の最大コストで判定）
+    # (4) 月予算チェック（実コスト + 次の1投稿のコストで判定）
     actual_cost = _calc_actual_monthly_cost(state)
-    # 次の1投稿が最悪URL付き($0.20)になるかもしれないので、上振れで見る
-    if actual_cost + COST_PER_URL_POST_USD > MONTHLY_BUDGET_USD:
+    # ★ 2026/05/25 変更: 全投稿URLなし固定 ($0.015) なので、URLなし単価で判定
+    if actual_cost + COST_PER_PLAIN_POST_USD > MONTHLY_BUDGET_USD:
         return False, (
-            f"今月の実コスト${actual_cost:.3f} + 次投稿$0.20 が予算${MONTHLY_BUDGET_USD:.2f}を超過"
+            f"今月の実コスト${actual_cost:.3f} + 次投稿$0.015 が予算${MONTHLY_BUDGET_USD:.2f}を超過"
         )
 
     # (5) 投稿間隔チェック
@@ -428,13 +416,13 @@ def clean_for_post(text: str) -> str:
 
 def should_include_url(state: Dict) -> bool:
     """次の投稿にURLを含めるかを判定。
-    URL_EVERY_N_POSTS=10 なら、累計投稿数を10で割った余りが0の時にURL付き。
-    つまり 1件目、11件目、21件目、... にURL付き投稿。
+
+    ★ 2026/05/25 変更: コスト削減のため、常に False を返す (全投稿URLなし)。
+       URL頻度の動的制御は無効化。
+       旧仕様: URL_EVERY_N_POSTS=10 で 1/10 にURL付き
+       新仕様: 全件 URLなし ($0.015/件)
     """
-    if URL_EVERY_N_POSTS <= 1:
-        return True  # 1=毎回URL付き
-    next_index = state.get("total_post_count", 0)  # 0始まりで次投稿のindex
-    return (next_index % URL_EVERY_N_POSTS) == 0
+    return False
 
 
 def format_tweet(body: str, handle: str, include_url: bool) -> str:
