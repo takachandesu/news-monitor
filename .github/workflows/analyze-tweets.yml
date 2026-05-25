@@ -1,0 +1,56 @@
+name: Analyze my tweets
+
+# フェーズ1: 検証のため手動実行のみ（cronなし）
+# 動作確認できたら schedule: を追加する
+on:
+  workflow_dispatch:
+    inputs:
+      days:
+        description: '過去何日分を分析するか'
+        required: false
+        default: '90'
+      threshold:
+        description: '閲覧数の閾値'
+        required: false
+        default: '200'
+
+permissions:
+  contents: write
+
+jobs:
+  analyze:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install --quiet requests janome
+
+      - name: Run analysis
+        env:
+          TWITTERAPI_IO_KEY: ${{ secrets.TWITTERAPI_IO_KEY }}
+        run: |
+          python analyze_my_tweets.py \
+            --days ${{ github.event.inputs.days || '90' }} \
+            --threshold ${{ github.event.inputs.threshold || '200' }}
+
+      - name: Commit keywords.json
+        if: always()
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add keywords.json 2>/dev/null || true
+          if git diff --cached --quiet; then
+            echo "No changes in keywords.json"
+          else
+            git commit -m "Update keywords.json from tweet analysis [skip ci]"
+            git push
+          fi
