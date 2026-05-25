@@ -1388,7 +1388,10 @@ def _translate_to_japanese(english_text: str) -> str:
     tmap = tc["map"]
     tdiag = tc["diag"]
 
-    cache_key = english_text.strip()
+    # ★ v2: プロンプトのバージョンを含めることで、プロンプト変更時に古い翻訳キャッシュを
+    # 自動的に無効化する。「トランプ前大統領」等の古い訳が再利用されるのを防ぐ。
+    _TRANSLATE_PROMPT_VERSION = "v2-strict-no-title"
+    cache_key = f"{_TRANSLATE_PROMPT_VERSION}::{english_text.strip()}"
     if cache_key in tmap:
         return tmap[cache_key]
 
@@ -1420,18 +1423,35 @@ def _translate_to_japanese(english_text: str) -> str:
                     "content": (
                         "次の英語の金融速報ヘッドラインを、自然な日本語に翻訳してください。\n"
                         "\n"
-                        "【厳守ルール】\n"
+                        "【最重要・絶対厳守】人物名に勝手な肩書きを付けるのは絶対に禁止。\n"
+                        "原文に明示されている肩書きだけを訳すこと。「氏」「さん」も同様に追加禁止。\n"
+                        "\n"
+                        "  ✅ 正しい例:\n"
+                        "    原文 'Trump says X'              → 訳『トランプはXと発言』\n"
+                        "    原文 'Trump:'                    → 訳『トランプ:』\n"
+                        "    原文 'President Trump says X'    → 訳『トランプ大統領はXと発言』\n"
+                        "    原文 'Former President Trump'    → 訳『トランプ前大統領』\n"
+                        "    原文 'Powell says X'             → 訳『パウエルはXと発言』\n"
+                        "    原文 'Fed Chair Powell'          → 訳『FRB議長パウエル』\n"
+                        "    原文 'BOJ Governor Ueda'         → 訳『日銀総裁植田』\n"
+                        "\n"
+                        "  ❌ 間違いの例 (絶対にやらないこと):\n"
+                        "    原文 'Trump says X'              → ✗『トランプ前大統領はXと発言』\n"
+                        "    原文 'Trump says X'              → ✗『トランプ氏はXと発言』\n"
+                        "    原文 'Trump says X'              → ✗『トランプ大統領はXと発言』\n"
+                        "    原文 'Trump says X'              → ✗『トランプ元大統領はXと発言』\n"
+                        "    原文 'Powell says X'             → ✗『パウエル議長はXと発言』\n"
+                        "    原文 'Powell says X'             → ✗『パウエル氏はXと発言』\n"
+                        "\n"
+                        "原文に書かれていない肩書き(『前大統領』『元大統領』『現大統領』『大統領』\n"
+                        "『議長』『総裁』『首相』『氏』『さん』など)を翻訳結果に追加することは\n"
+                        "絶対に禁止。原文が単に名前だけなら、訳も名前だけ。\n"
+                        "\n"
+                        "【その他のルール】\n"
                         "1. 翻訳結果のみを出力し、説明や前置きは一切付けないこと。\n"
                         "2. ニュース速報らしい簡潔な表現にすること。\n"
                         "3. 原文に書かれていない情報を一切補足しないこと。\n"
-                        "   例: 原文が 'Trump' なら『トランプ』とだけ訳す。\n"
-                        "       『前大統領』『元大統領』『現大統領』『氏』『大統領』など、\n"
-                        "       原文に書かれていない肩書き・敬称・属性を勝手に足さない。\n"
-                        "4. 人物名は原文のまま訳す。原文が 'Powell' なら『パウエル』、\n"
-                        "   'Yellen' なら『イエレン』、'Ueda' なら『植田』など。\n"
-                        "   原文に役職(Fed Chair, Treasury Secretary, BOJ Governor等)が\n"
-                        "   明示されている場合のみ役職を付ける。\n"
-                        "5. 国名・組織名・通貨も原文に書かれている範囲で訳す。\n"
+                        "4. 国名・組織名・通貨も原文に書かれている範囲で訳す。\n"
                         "\n"
                         "【原文】\n"
                         + english_text
@@ -2711,16 +2731,19 @@ st.markdown("<hr />", unsafe_allow_html=True)
 #   NQ=F  = CME E-mini NASDAQ-100 Futures (USD建て、ほぼ24h)
 #   JPY=X = USD/JPY スポット (24h)
 _CHART_SPECS = [
-    ("日経平均(24h CFD)",     "OANDA:JP225USD",     "overview", "^N225,NKD=F,NIY=F"),               # 東証現物→CME USD先物→円先物
-    ("NASDAQ100(24h CFD)",    "OANDA:NAS100USD",    "overview", "NQ=F,MNQ=F,^NDX,^IXIC"),           # CME NASDAQ先物→Micro→現物→Composite
-    ("ドル円",                "FX:USDJPY",          "overview", "USDJPY=X,JPY=X"),                  # USD/JPY
+    # (label, tv_symbol, kind, yahoo_ticker_chain, cash_ref_ticker)
+    # cash_ref_ticker: 指定されると、prev_closeをこのティッカー(現物指数)の直近完了セッション終値で上書き
+    #                  → バッジの % が「現物終値からの変化率」になる(NASDAQ等の米国祝日対策)
+    ("日経平均(24h CFD)",     "OANDA:JP225USD",     "overview", "^N225,NKD=F,NIY=F",          None),    # 日経はOSE先物がほぼ現物連動
+    ("NASDAQ100(24h CFD)",    "OANDA:NAS100USD",    "overview", "NQ=F,MNQ=F,^NDX,^IXIC",      "^NDX"),  # 現在価格は先物、prev_closeは^NDX現物
+    ("ドル円",                "FX:USDJPY",          "overview", "USDJPY=X,JPY=X",             None),    # FXは24h、現物概念なし
 ]
 
 
 _PCT_CACHE: Dict[str, Tuple[float, Optional[str], Optional[str], Optional[str]]] = {}
 _PCT_CACHE_TTL_SEC = 120   # 2分 (短くして古いキャッシュを残さない)
 _PCT_STALE_TTL_SEC = 3600  # 1時間: フェッチ全失敗時に古いキャッシュを使う上限
-_PCT_CACHE_VERSION = "v7"   # v7: TVシンボル候補を複数試行 (CME_MINI:NQ1!, CAPITALCOM:US100 等)
+_PCT_CACHE_VERSION = "v8"   # v8: cash_ref_ticker でprev_closeを現物終値に上書き対応
 
 # ★ NEW (v6): 各データソースの試行結果を記録するための診断辞書。
 # キー: "{yahoo_ticker}:{source}" (例: "NQ=F:tv", "NQ=F:cme")
@@ -3054,6 +3077,66 @@ def _fetch_yahoo_direct(ticker: str):
         return None, None
 
 
+def _fetch_yahoo_cash_close(yahoo_ticker: str):
+    """★ NEW (v8): Yahoo Finance から「直近の完了した現物セッション終値」を取得。
+
+    用途: 先物の現在価格 vs 現物の直近終値 で % を計算したい時に使う(NASDAQバッジ等)。
+
+    動作:
+      - 現物市場が今日休場(米国祝日等) → meta.regularMarketPrice = 直近営業日の終値
+      - 現物市場が今日取引中           → meta.chartPreviousClose = 前営業日の終値
+      - 現物市場が今日取引終了後        → meta.regularMarketPrice = 今日の終値
+    marketState で分岐して、確実に「直近の完了したセッションの終値」を返す。
+
+    返り値: float or None
+    """
+    try:
+        url = f"https://query1.finance.yahoo.com/v8/finance/chart/{yahoo_ticker}?interval=5m&range=1d&includePrePost=false"
+        r = requests.get(url, headers={
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/122.0.0.0 Safari/537.36"
+            ),
+            "Accept": "application/json",
+        }, timeout=5)
+        if r.status_code != 200:
+            _SOURCE_DIAG[yahoo_ticker + ":cash"] = f"HTTP{r.status_code}"
+            return None
+        data = r.json()
+        result = (data.get("chart") or {}).get("result") or []
+        if not result:
+            _SOURCE_DIAG[yahoo_ticker + ":cash"] = "no-result"
+            return None
+        meta = result[0].get("meta") or {}
+        market_state = (meta.get("marketState") or "").upper()
+        rmp = meta.get("regularMarketPrice")
+        cpc = meta.get("chartPreviousClose") or meta.get("previousClose")
+
+        # 取引中 (REGULAR) なら、参照したいのは「昨日の終値」 = chartPreviousClose
+        # 取引外 (CLOSED/PRE/POST) なら、参照したいのは「直近の終値」 = regularMarketPrice
+        if market_state == "REGULAR":
+            if cpc and cpc > 0:
+                _SOURCE_DIAG[yahoo_ticker + ":cash"] = f"OK[chartPrevClose,{market_state}]"
+                return float(cpc)
+        else:
+            if rmp and rmp > 0:
+                _SOURCE_DIAG[yahoo_ticker + ":cash"] = f"OK[regMktPrice,{market_state}]"
+                return float(rmp)
+        # フォールバック
+        if cpc and cpc > 0:
+            _SOURCE_DIAG[yahoo_ticker + ":cash"] = f"OK[fallback-cpc,{market_state}]"
+            return float(cpc)
+        if rmp and rmp > 0:
+            _SOURCE_DIAG[yahoo_ticker + ":cash"] = f"OK[fallback-rmp,{market_state}]"
+            return float(rmp)
+        _SOURCE_DIAG[yahoo_ticker + ":cash"] = f"no-value,{market_state}"
+        return None
+    except Exception as e:
+        _SOURCE_DIAG[yahoo_ticker + ":cash"] = f"EXC:{type(e).__name__}"
+        return None
+
+
 def _fetch_stooq(ticker: str):
     """stooq.com から CSV を取って (last_close, prev_close) を返す"""
     try:
@@ -3085,11 +3168,16 @@ def _fetch_stooq(ticker: str):
         return None, None
 
 
-def _calc_prev_close_pct(yahoo_ticker: str):
+def _calc_prev_close_pct(yahoo_ticker: str, cash_ref_ticker: Optional[str] = None):
     """前営業日終値、現在値、変化率を取得。
     複数データソースを試行してプライス表示を最優先する。
 
-    取得経路 (v5・各ティッカーごとに順番にトライ):
+    yahoo_ticker: 現在価格を取りに行くティッカー (futures含む)
+    cash_ref_ticker: 指定時は prev_close をこのティッカー(現物指数)の直近完了セッション
+                     終値で上書きする。% 表示が「現物終値からの変化率」になる。
+                     NASDAQバッジ等の米国祝日対策。
+
+    取得経路 (v8・各ティッカーごとに順番にトライ):
       ⓪ TradingView Scanner   (埋め込みチャートと完全同期・最優先)
       ① CME Group 公開API      (futures only・本家サイトと完全整合)
       ② Yahoo Direct API       (HTTP直接・ライブラリ非依存)
@@ -3097,11 +3185,13 @@ def _calc_prev_close_pct(yahoo_ticker: str):
       ④ stooq.com              (HTTP直接・別ソース)
       ⑤ yfinance.history       (日足・最後の手段)
       ⑥ 古いキャッシュ           (StaleTTL内なら採用)
+    cash_ref_ticker 指定時は、(last, prev) 取得後に prev だけ現物終値で差し替え。
 
     返り値: (price_str, pct_str, color) or (None, None, None)
     """
     now_ts = time.time()
-    cache_key = f"{_PCT_CACHE_VERSION}:{yahoo_ticker}"
+    # キャッシュキーに cash_ref も含めて区別
+    cache_key = f"{_PCT_CACHE_VERSION}:{yahoo_ticker}:cash={cash_ref_ticker}"
     cached = _PCT_CACHE.get(cache_key)
     if cached is not None:
         ts, price_str, pct_str, color = cached
@@ -3123,41 +3213,40 @@ def _calc_prev_close_pct(yahoo_ticker: str):
         color = "#16a34a" if pct >= 0 else "#dc2626"
         return _format_price(close_today), f"{sign}{pct:.2f}%", color
 
+    # ★ NEW (v8): cash_ref_ticker が指定されていれば、現物指数の直近終値を先に取得しておく。
+    # 各データソースで取れた prev_close は futures の prior settle なので、
+    # ここで取った cash_prev_close で上書きすることで、% が「現物終値からの変化率」になる。
+    cash_prev_close = None
+    if cash_ref_ticker:
+        cash_prev_close = _fetch_yahoo_cash_close(cash_ref_ticker)
+
+    def _finalize(last_close: float, prev_close: float, source_tag: str):
+        """共通の終端処理: cash_ref があれば prev を差し替え、フォーマット、キャッシュ、診断記録"""
+        # cash_prev_close が取れていればそれで上書き
+        effective_prev = cash_prev_close if (cash_prev_close and cash_prev_close > 0) else prev_close
+        price_str, pct_str, color = _format_result(last_close, effective_prev)
+        _PCT_CACHE[cache_key] = (now_ts, price_str, pct_str, color)
+        ref_tag = f"+cash({cash_ref_ticker})" if (cash_prev_close and cash_prev_close > 0) else ""
+        _FINAL_SOURCE[yahoo_ticker] = f"{source_tag}{ref_tag}"
+        return price_str, pct_str, color
+
     tickers = [t.strip() for t in yahoo_ticker.split(",") if t.strip()]
 
     for tk in tickers:
         # ★★★ ⓪ TradingView Scanner API (埋め込みチャートと完全同期・最優先)
-        # OANDA:NAS100USD など、チャートに使っているCFDシンボルそのものを直接叩く。
-        # 「チャートで動いているのにバッジが古い」現象が原理的に起きない。
-        # 認証不要、24h配信、futures/CFD/FXすべて対応。
-        # _TV_SYMBOL_MAP に登録のないティッカーは (None, None) で即時通過。
         last_close, prev_close = _fetch_tradingview_quote(tk)
         if last_close and prev_close and prev_close > 0:
-            price_str, pct_str, color = _format_result(last_close, prev_close)
-            _PCT_CACHE[cache_key] = (now_ts, price_str, pct_str, color)
-            _FINAL_SOURCE[yahoo_ticker] = f"tv:{tk}"
-            return price_str, pct_str, color
+            return _finalize(last_close, prev_close, f"tv:{tk}")
 
         # ★★ ① CME Group 公開API (futures only, 本家サイトと完全整合)
-        # cmegroup.com の公式ページが表示している値そのものを返す。
-        # Memorial Day等の米国祝日でも Globex 取引中なら確実に最新値を返す。
-        # _CME_PRODUCT_IDS に登録のないティッカー(^N225, USDJPY=X等)は
-        # (None, None) が返るので何もせず次に進む。
         last_close, prev_close = _fetch_cme_quote(tk)
         if last_close and prev_close and prev_close > 0:
-            price_str, pct_str, color = _format_result(last_close, prev_close)
-            _PCT_CACHE[cache_key] = (now_ts, price_str, pct_str, color)
-            _FINAL_SOURCE[yahoo_ticker] = f"cme:{tk}"
-            return price_str, pct_str, color
+            return _finalize(last_close, prev_close, f"cme:{tk}")
 
         # ★ ② Yahoo Direct API (v8 chart の meta.regularMarketPrice = リアルタイム値)
-        # これが最も信頼できる。取引中の最新値を返す。
         last_close, prev_close = _fetch_yahoo_direct(tk)
         if last_close and prev_close and prev_close > 0:
-            price_str, pct_str, color = _format_result(last_close, prev_close)
-            _PCT_CACHE[cache_key] = (now_ts, price_str, pct_str, color)
-            _FINAL_SOURCE[yahoo_ticker] = f"yahoo-v8:{tk}"
-            return price_str, pct_str, color
+            return _finalize(last_close, prev_close, f"yahoo-v8:{tk}")
 
         # ② yfinance.fast_info (ライブラリ経由・リアルタイム値)
         try:
@@ -3167,20 +3256,14 @@ def _calc_prev_close_pct(yahoo_ticker: str):
             last = float(fi.last_price) if fi.last_price is not None else None
             prev = float(fi.previous_close) if fi.previous_close is not None else None
             if last and prev and prev > 0 and last > 0:
-                price_str, pct_str, color = _format_result(last, prev)
-                _PCT_CACHE[cache_key] = (now_ts, price_str, pct_str, color)
-                _FINAL_SOURCE[yahoo_ticker] = f"yfinance-fast:{tk}"
-                return price_str, pct_str, color
+                return _finalize(last, prev, f"yfinance-fast:{tk}")
         except Exception:
             pass
 
         # ③ stooq.com (HTTP直接・別データソース)
         last_close, prev_close = _fetch_stooq(tk)
         if last_close and prev_close and prev_close > 0:
-            price_str, pct_str, color = _format_result(last_close, prev_close)
-            _PCT_CACHE[cache_key] = (now_ts, price_str, pct_str, color)
-            _FINAL_SOURCE[yahoo_ticker] = f"stooq:{tk}"
-            return price_str, pct_str, color
+            return _finalize(last_close, prev_close, f"stooq:{tk}")
 
         # ④ yfinance.history (日足のみ・取引中はラスト確定終値しか取れず誤計算するので最後の手段)
         try:
@@ -3192,10 +3275,7 @@ def _calc_prev_close_pct(yahoo_ticker: str):
                 close_prev = float(hist["Close"].iloc[-2])
                 # 同じ値だと0%になってしまうので、安全チェック
                 if close_prev > 0 and close_today > 0 and close_today != close_prev:
-                    price_str, pct_str, color = _format_result(close_today, close_prev)
-                    _PCT_CACHE[cache_key] = (now_ts, price_str, pct_str, color)
-                    _FINAL_SOURCE[yahoo_ticker] = f"yfinance-hist:{tk}"
-                    return price_str, pct_str, color
+                    return _finalize(close_today, close_prev, f"yfinance-hist:{tk}")
         except Exception:
             pass
 
@@ -3264,9 +3344,9 @@ def _tv_widget_block(symbol: str, kind: str = "mini", color_theme: str = "light"
 
 
 # ★ チャート3つを横並び表示。テーマ自動切替＋ラベル＋前営業日比%バッジ。
-def _build_chart_payload(label, sym, kind, yahoo_ticker):
+def _build_chart_payload(label, sym, kind, yahoo_ticker, cash_ref_ticker=None):
     """各チャートのpayloadを構築。現在価格と前営業日比%を含める"""
-    price_str, pct_str, pct_color = _calc_prev_close_pct(yahoo_ticker)
+    price_str, pct_str, pct_color = _calc_prev_close_pct(yahoo_ticker, cash_ref_ticker=cash_ref_ticker)
     if pct_str is None:
         price_str = "—"
         pct_str = "—"
@@ -3282,8 +3362,8 @@ def _build_chart_payload(label, sym, kind, yahoo_ticker):
 
 _chart_payloads_json = json.dumps(
     [
-        _build_chart_payload(label, sym, kind, yahoo)
-        for label, sym, kind, yahoo in _CHART_SPECS
+        _build_chart_payload(label, sym, kind, yahoo, cash_ref)
+        for label, sym, kind, yahoo, cash_ref in _CHART_SPECS
     ],
     ensure_ascii=False,
 )
