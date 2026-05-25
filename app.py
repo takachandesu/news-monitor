@@ -3518,31 +3518,44 @@ except Exception:
 
 components.html(_charts_html, height=270)
 
-# ★ NEW (v6): データソース診断 (折りたたみ、デフォルト閉)
-# 「NASDAQ100だけ古い値が出る」問題を切り分けるためのデバッグ情報。
-# 各銘柄について、TradingView / CME / Yahoo 等のうちどのソースから取れたかを表示。
+# ★ NEW (v6→v8): データソース診断
+# URLに ?debug=1 が付いている時だけ表示する。
+# 通常閲覧時はスッキリした見た目、トラブル時は ?debug=1 で原因切り分け可能。
 try:
-    with st.expander("🔧 データソース診断 (デバッグ用)", expanded=False):
-        st.caption(
-            "下段3チャートのバッジ値が、どのデータソースから取れたかを表示します。"
-            "TradingView Scanner や CME が `OK` ならそれが採用、それ以外なら Yahoo にフォールバック。"
-        )
-        # 採用されたソース
-        if _FINAL_SOURCE:
-            st.markdown("**最終採用ソース**")
-            st.code(
-                "\n".join(f"{k:32s} → {v}" for k, v in _FINAL_SOURCE.items()),
-                language=None,
+    # query_params: ?debug=1 / ?debug=true / ?debug=on でON
+    _debug_param = ""
+    try:
+        _debug_param = str(st.query_params.get("debug", "")).lower()
+    except Exception:
+        # 古いStreamlit用フォールバック
+        try:
+            _qp = st.experimental_get_query_params()
+            _debug_param = str(_qp.get("debug", [""])[0]).lower()
+        except Exception:
+            _debug_param = ""
+
+    if _debug_param in ("1", "true", "on", "yes"):
+        with st.expander("🔧 データソース診断 (デバッグ用)", expanded=True):
+            st.caption(
+                "下段3チャートのバッジ値が、どのデータソースから取れたかを表示します。"
+                "URLから `?debug=1` を外せばこのパネルは消えます。"
             )
-        # 各ソースの試行結果
-        if _SOURCE_DIAG:
-            st.markdown("**各データソースの試行結果**")
-            st.code(
-                "\n".join(f"{k:32s} → {v}" for k, v in sorted(_SOURCE_DIAG.items())),
-                language=None,
-            )
-        if not _FINAL_SOURCE and not _SOURCE_DIAG:
-            st.caption("(まだフェッチされていません。下段チャートが描画されるまで待ってください)")
+            # 採用されたソース
+            if _FINAL_SOURCE:
+                st.markdown("**最終採用ソース**")
+                st.code(
+                    "\n".join(f"{k:32s} → {v}" for k, v in _FINAL_SOURCE.items()),
+                    language=None,
+                )
+            # 各ソースの試行結果
+            if _SOURCE_DIAG:
+                st.markdown("**各データソースの試行結果**")
+                st.code(
+                    "\n".join(f"{k:32s} → {v}" for k, v in sorted(_SOURCE_DIAG.items())),
+                    language=None,
+                )
+            if not _FINAL_SOURCE and not _SOURCE_DIAG:
+                st.caption("(まだフェッチされていません。下段チャートが描画されるまで待ってください)")
 except Exception:
     pass  # 診断UIで例外が出ても本体に影響させない
 
