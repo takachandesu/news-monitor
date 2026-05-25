@@ -2753,9 +2753,11 @@ def _http_get_with_ua(url: str, timeout: int = 6):
 
 
 def _fetch_yahoo_direct(ticker: str):
-    """Yahoo Finance 公開API を直接叩いて (last_close, prev_close) を返す"""
+    """Yahoo Finance 公開API を直接叩いて (last_price, prev_close) を返す。
+    meta.regularMarketPrice (リアルタイム値) と meta.chartPreviousClose (前営業日終値)
+    を取るので、取引中の最新値が反映される。"""
     try:
-        url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}?interval=1d&range=7d"
+        url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}?interval=5m&range=1d"
         r = _http_get_with_ua(url)
         if r is None:
             return None, None
@@ -2763,13 +2765,25 @@ def _fetch_yahoo_direct(ticker: str):
         result = data.get("chart", {}).get("result")
         if not result:
             return None, None
+        meta = result[0].get("meta", {})
+
+        # ① meta から直接取得 (最もリアルタイム性が高い)
+        current = meta.get("regularMarketPrice")
+        prev_close = meta.get("chartPreviousClose") or meta.get("previousClose")
+        if current is not None and prev_close is not None:
+            current = float(current)
+            prev_close = float(prev_close)
+            if current > 0 and prev_close > 0:
+                return current, prev_close
+
+        # ② フォールバック: 時系列データの最新値を使う
         quote = result[0].get("indicators", {}).get("quote", [{}])[0]
         closes = quote.get("close", [])
-        # None を除外
         valid = [c for c in closes if c is not None]
-        if len(valid) < 2:
-            return None, None
-        return float(valid[-1]), float(valid[-2])
+        if len(valid) >= 1 and prev_close is not None:
+            return float(valid[-1]), float(prev_close)
+
+        return None, None
     except Exception:
         return None, None
 
@@ -2843,7 +2857,15 @@ def _calc_prev_close_pct(yahoo_ticker: str):
     tickers = [t.strip() for t in yahoo_ticker.split(",") if t.strip()]
 
     for tk in tickers:
-        # ① yfinance.fast_info
+        # ★ ① Yahoo Direct API (v8 chart の meta.regularMarketPrice = リアルタイム値)
+        # これが最も信頼できる。取引中の最新値を返す。
+        last_close, prev_close = _fetch_yahoo_direct(tk)
+        if last_close and prev_close and prev_close > 0:
+            price_str, pct_str, color = _format_result(last_close, prev_close)
+            _PCT_CACHE[yahoo_ticker] = (now_ts, price_str, pct_str, color)
+            return price_str, pct_str, color
+
+        # ② yfinance.fast_info (ライブラリ経由・リアルタイム値)
         try:
             import yfinance as yf
             ticker = yf.Ticker(tk)
@@ -2857,7 +2879,14 @@ def _calc_prev_close_pct(yahoo_ticker: str):
         except Exception:
             pass
 
-        # ② yfinance.history
+        # ③ stooq.com (HTTP直接・別データソース)
+        last_close, prev_close = _fetch_stooq(tk)
+        if last_close and prev_close and prev_close > 0:
+            price_str, pct_str, color = _format_result(last_close, prev_close)
+            _PCT_CACHE[yahoo_ticker] = (now_ts, price_str, pct_str, color)
+            return price_str, pct_str, color
+
+        # ④ yfinance.history (日足のみ・取引中はラスト確定終値しか取れず誤計算するので最後の手段)
         try:
             import yfinance as yf
             ticker = yf.Ticker(tk)
@@ -2865,26 +2894,13 @@ def _calc_prev_close_pct(yahoo_ticker: str):
             if hist is not None and len(hist) >= 2:
                 close_today = float(hist["Close"].iloc[-1])
                 close_prev = float(hist["Close"].iloc[-2])
-                if close_prev > 0 and close_today > 0:
+                # 同じ値だと0%になってしまうので、安全チェック
+                if close_prev > 0 and close_today > 0 and close_today != close_prev:
                     price_str, pct_str, color = _format_result(close_today, close_prev)
                     _PCT_CACHE[yahoo_ticker] = (now_ts, price_str, pct_str, color)
                     return price_str, pct_str, color
         except Exception:
             pass
-
-        # ③ Yahoo Direct API (HTTP)
-        last_close, prev_close = _fetch_yahoo_direct(tk)
-        if last_close and prev_close and prev_close > 0:
-            price_str, pct_str, color = _format_result(last_close, prev_close)
-            _PCT_CACHE[yahoo_ticker] = (now_ts, price_str, pct_str, color)
-            return price_str, pct_str, color
-
-        # ④ stooq.com (HTTP)
-        last_close, prev_close = _fetch_stooq(tk)
-        if last_close and prev_close and prev_close > 0:
-            price_str, pct_str, color = _format_result(last_close, prev_close)
-            _PCT_CACHE[yahoo_ticker] = (now_ts, price_str, pct_str, color)
-            return price_str, pct_str, color
 
     # ⑤ 全部失敗 → 古いキャッシュ採用 (1時間以内なら表示)
     if cached is not None:
