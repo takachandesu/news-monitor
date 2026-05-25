@@ -2717,15 +2717,25 @@ _CHART_SPECS = [
 ]
 
 
+_PCT_CACHE: Dict[str, Tuple[float, Optional[str], Optional[str], Optional[str]]] = {}
+_PCT_CACHE_TTL_SEC = 300   # 5分
+
+
 def _calc_prev_close_pct(yahoo_ticker: str):
-    """Yahoo Finance から前営業日終値と現在値の比率を計算。
-    返り値: (pct_str, color) or (None, None)。
+    """Yahoo Finance から前営業日終値、現在値、変化率を取得。
+    返り値: (price_str, pct_str, color) or (None, None, None)。
 
     yahoo_ticker は ',' 区切りで複数指定可。最初に取れたものを使う。
     例: "NIY=F,^N225"  ← NIY=Fで取れなければ^N225にフォールバック
-
-    例: ("+3.03%", "#16a34a") 緑色プラス / ("-0.25%", "#dc2626") 赤色マイナス
     """
+    # メモリキャッシュ (5分有効)
+    now_ts = time.time()
+    cached = _PCT_CACHE.get(yahoo_ticker)
+    if cached is not None:
+        ts, price_str, pct_str, color = cached
+        if (now_ts - ts) < _PCT_CACHE_TTL_SEC:
+            return price_str, pct_str, color
+
     tickers = [t.strip() for t in yahoo_ticker.split(",") if t.strip()]
     for tk in tickers:
         try:
@@ -2734,7 +2744,7 @@ def _calc_prev_close_pct(yahoo_ticker: str):
             hist = ticker.history(period="7d", interval="1d", auto_adjust=False)
             if hist is None or len(hist) < 2:
                 continue
-            # 最新の終値
+            # 最新の終値（= 現在価格相当）
             close_today = float(hist["Close"].iloc[-1])
             # 前営業日(最新の1つ前)の終値
             close_prev = float(hist["Close"].iloc[-2])
@@ -2743,10 +2753,21 @@ def _calc_prev_close_pct(yahoo_ticker: str):
             pct = (close_today - close_prev) / close_prev * 100.0
             sign = "+" if pct >= 0 else ""
             color = "#16a34a" if pct >= 0 else "#dc2626"   # 緑/赤
-            return f"{sign}{pct:.2f}%", color
+            pct_str = f"{sign}{pct:.2f}%"
+            # 価格フォーマット (大きい数字はカンマ付き)
+            if close_today >= 1000:
+                price_str = f"{close_today:,.2f}"
+            elif close_today >= 10:
+                price_str = f"{close_today:.3f}"
+            else:
+                price_str = f"{close_today:.4f}"
+            _PCT_CACHE[yahoo_ticker] = (now_ts, price_str, pct_str, color)
+            return price_str, pct_str, color
         except Exception:
             continue
-    return None, None
+    # 全部失敗
+    _PCT_CACHE[yahoo_ticker] = (now_ts, None, None, None)
+    return None, None, None
 
 
 def _tv_widget_block(symbol: str, kind: str = "mini", color_theme: str = "light") -> str:
@@ -2803,12 +2824,17 @@ def _tv_widget_block(symbol: str, kind: str = "mini", color_theme: str = "light"
 
 # ★ チャート3つを横並び表示。テーマ自動切替＋ラベル＋前営業日比%バッジ。
 def _build_chart_payload(label, sym, kind, yahoo_ticker):
-    """各チャートのpayloadを構築。前営業日比%もラベル横に含める"""
-    pct_str, pct_color = _calc_prev_close_pct(yahoo_ticker)
+    """各チャートのpayloadを構築。現在価格と前営業日比%を含める"""
+    price_str, pct_str, pct_color = _calc_prev_close_pct(yahoo_ticker)
+    if pct_str is None:
+        price_str = "—"
+        pct_str = "—"
+        pct_color = "#9ca3af"
     return {
         "label": label,
-        "pct": pct_str,            # 例: "+3.03%" or None
-        "pct_color": pct_color,    # "#16a34a" / "#dc2626" or None
+        "price": price_str,        # 例: "29,481.64" or "—"
+        "pct": pct_str,            # 例: "+3.03%" or "—"
+        "pct_color": pct_color,    # "#16a34a" / "#dc2626" / "#9ca3af"
         "light_html": _tv_widget_block(sym, kind, color_theme="light"),
         "dark_html":  _tv_widget_block(sym, kind, color_theme="dark"),
     }
@@ -2843,16 +2869,43 @@ _charts_html = """
       overflow: hidden;
   }
   #tv-charts-wrap .tv-label {
-      font-size: clamp(13px, 1.8vw, 16px);
+      font-size: clamp(12px, 1.6vw, 15px);
       font-weight: 800;
       color: #111;
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI",
         "Hiragino Kaku Gothic ProN", "Yu Gothic UI", "Meiryo", sans-serif;
       letter-spacing: 0.2px;
-      margin: 0 0 4px 2px;
+      margin: 0 0 2px 2px;
       white-space: nowrap;
       overflow: hidden;
       text-overflow: ellipsis;
+  }
+  #tv-charts-wrap .tv-pct-row {
+      margin: 0 0 4px 2px;
+      font-size: 11px;
+      line-height: 1.2;
+      white-space: nowrap;
+  }
+  #tv-charts-wrap .tv-price {
+      display: inline-block;
+      font-size: 14px;
+      font-weight: 800;
+      color: #111;
+      margin-right: 5px;
+      font-family: "Helvetica Neue", "Yu Gothic UI", Arial, sans-serif;
+  }
+  #tv-charts-wrap .tv-pct-badge {
+      display: inline-block;
+      padding: 1px 6px;
+      border-radius: 4px;
+      color: #fff;
+      font-weight: 700;
+      font-size: 11px;
+  }
+  #tv-charts-wrap .tv-pct-caption {
+      color: #777;
+      font-size: 10px;
+      margin-left: 4px;
   }
 </style>
 <div id="tv-charts-wrap"></div>
@@ -2884,31 +2937,28 @@ _charts_html = """
         const col = document.createElement('div');
         col.className = 'tv-col';
 
+        // 1行目: タイトル (例: "日経平均(24h CFD)")
         const label = document.createElement('div');
         label.className = 'tv-label';
-        // ラベル本体
-        const labelText = document.createElement('span');
-        labelText.textContent = p.label;
-        label.appendChild(labelText);
-        // 前営業日比%バッジ
-        if (p.pct) {
-            const pctBadge = document.createElement('span');
-            pctBadge.textContent = p.pct;
-            pctBadge.style.cssText = (
-                'display:inline-block;'
-                + 'margin-left:6px;'
-                + 'padding:1px 6px;'
-                + 'border-radius:4px;'
-                + 'background:' + (p.pct_color || '#666') + ';'
-                + 'color:#fff;'
-                + 'font-size:11px;'
-                + 'font-weight:700;'
-                + 'vertical-align:middle;'
-            );
-            pctBadge.title = '前営業日比';
-            label.appendChild(pctBadge);
-        }
+        label.textContent = p.label;
         col.appendChild(label);
+
+        // 2行目: 現在価格 + 前営業日比%バッジ
+        const pctRow = document.createElement('div');
+        pctRow.className = 'tv-pct-row';
+        // 現在価格
+        const priceSpan = document.createElement('span');
+        priceSpan.className = 'tv-price';
+        priceSpan.textContent = p.price || '—';
+        pctRow.appendChild(priceSpan);
+        // % バッジ
+        const pctBadge = document.createElement('span');
+        pctBadge.className = 'tv-pct-badge';
+        pctBadge.textContent = p.pct || '—';
+        pctBadge.style.background = p.pct_color || '#9ca3af';
+        pctBadge.title = '前営業日比';
+        pctRow.appendChild(pctBadge);
+        col.appendChild(pctRow);
 
         const holder = document.createElement('div');
         holder.innerHTML = theme === 'dark' ? p.dark_html : p.light_html;
