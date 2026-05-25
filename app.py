@@ -2720,7 +2720,7 @@ _CHART_SPECS = [
 _PCT_CACHE: Dict[str, Tuple[float, Optional[str], Optional[str], Optional[str]]] = {}
 _PCT_CACHE_TTL_SEC = 120   # 2分 (短くして古いキャッシュを残さない)
 _PCT_STALE_TTL_SEC = 3600  # 1時間: フェッチ全失敗時に古いキャッシュを使う上限
-_PCT_CACHE_VERSION = "v4"   # ← ロジック変更時にインクリメントして古いキャッシュ無効化 (v4: CME直接APIを最優先に)
+_PCT_CACHE_VERSION = "v5"   # ← ロジック変更時にインクリメントして古いキャッシュ無効化 (v5: TradingView Scanner APIを最優先に)
 
 # Stooq へのティッカーマッピング
 _STOOQ_MAP = {
@@ -2752,6 +2752,26 @@ _CME_PRODUCT_IDS = {
 }
 
 
+# ★ NEW (v5): TradingView Scanner API 用シンボルマッピング
+# 各 Yahoo ティッカーに対応する TradingView シンボル (= 埋め込みチャートで実際に表示しているもの)
+# Scanner API でこのシンボルを叩くと、チャート上の数字と完全に一致する値が返る。
+# つまり「チャートが動いているのにバッジが古い」現象が原理的に起きない最強の整合性。
+_TV_SYMBOL_MAP = {
+    # NASDAQ系: OANDA:NAS100USD は CME先物とほぼ同じ動き、24h配信
+    "NQ=F":     "OANDA:NAS100USD",
+    "MNQ=F":    "OANDA:NAS100USD",
+    "^NDX":     "OANDA:NAS100USD",
+    "^IXIC":    "OANDA:NAS100USD",
+    # 日経系: OANDA:JP225USD は CME先物相当
+    "^N225":    "OANDA:JP225USD",
+    "NKD=F":    "OANDA:JP225USD",
+    "NIY=F":    "OANDA:JP225USD",
+    # ドル円: FX:USDJPY は24h
+    "USDJPY=X": "FX:USDJPY",
+    "JPY=X":    "FX:USDJPY",
+}
+
+
 def _http_get_with_ua(url: str, timeout: int = 6):
     """User-Agent付きで HTTP GET。失敗時は None"""
     try:
@@ -2768,6 +2788,66 @@ def _http_get_with_ua(url: str, timeout: int = 6):
     except Exception:
         pass
     return None
+
+
+def _fetch_tradingview_quote(yahoo_ticker: str):
+    """★ NEW (v5): TradingView Scanner API から (last, prev_close) を取得。
+
+    埋め込みチャートと同じシンボル (OANDA:NAS100USD 等) を直接叩くので、
+    バッジに表示する値 = チャートに表示される値 が保証される最強の整合性。
+
+    エンドポイント: POST https://scanner.tradingview.com/symbol
+    本家TVのフロントエンドが使っている内部APIで、認証不要・24h稼働。
+    レスポンス: {"data":[{"s":"OANDA:NAS100USD","d":[29930.75, 1.26, 372.0]}]}
+                                                       ↑close ↑%   ↑abs change
+
+    返り値: (last, prev_close) or (None, None)
+    """
+    tv_symbol = _TV_SYMBOL_MAP.get(yahoo_ticker)
+    if not tv_symbol:
+        return None, None
+    try:
+        url = "https://scanner.tradingview.com/symbol"
+        body = {
+            "symbols": {"tickers": [tv_symbol], "query": {"types": []}},
+            "columns": ["close", "change", "change_abs"],
+        }
+        r = requests.post(
+            url,
+            json=body,
+            timeout=6,
+            headers={
+                "User-Agent": (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/122.0.0.0 Safari/537.36"
+                ),
+                "Accept": "application/json",
+                "Content-Type": "application/json",
+                "Origin": "https://www.tradingview.com",
+                "Referer": "https://www.tradingview.com/",
+            },
+        )
+        if r.status_code != 200:
+            return None, None
+        data = r.json()
+        rows = data.get("data") or []
+        if not rows:
+            return None, None
+        d = rows[0].get("d") or []
+        if len(d) < 3:
+            return None, None
+        # d[0] = 現在価格(close), d[1] = 変化率%, d[2] = 絶対変化額
+        if d[0] is None or d[2] is None:
+            return None, None
+        last = float(d[0])
+        change_abs = float(d[2])
+        prev = last - change_abs
+        if last > 0 and prev > 0:
+            return last, prev
+        return None, None
+    except Exception:
+        return None, None
 
 
 def _fetch_cme_quote(yahoo_ticker: str):
@@ -2927,13 +3007,14 @@ def _calc_prev_close_pct(yahoo_ticker: str):
     """前営業日終値、現在値、変化率を取得。
     複数データソースを試行してプライス表示を最優先する。
 
-    取得経路 (v4・各ティッカーごとに順番にトライ):
-      ⓪ CME Group 公開API    (futures only・本家サイトと完全整合、最優先)
-      ① Yahoo Direct API     (HTTP直接・ライブラリ非依存)
-      ② yfinance.fast_info   (ライブラリ経由・リアルタイム値)
-      ③ stooq.com            (HTTP直接・別ソース)
-      ④ yfinance.history     (日足・最後の手段)
-      ⑤ 古いキャッシュ         (StaleTTL内なら採用)
+    取得経路 (v5・各ティッカーごとに順番にトライ):
+      ⓪ TradingView Scanner   (埋め込みチャートと完全同期・最優先)
+      ① CME Group 公開API      (futures only・本家サイトと完全整合)
+      ② Yahoo Direct API       (HTTP直接・ライブラリ非依存)
+      ③ yfinance.fast_info     (ライブラリ経由・リアルタイム値)
+      ④ stooq.com              (HTTP直接・別ソース)
+      ⑤ yfinance.history       (日足・最後の手段)
+      ⑥ 古いキャッシュ           (StaleTTL内なら採用)
 
     返り値: (price_str, pct_str, color) or (None, None, None)
     """
@@ -2963,7 +3044,18 @@ def _calc_prev_close_pct(yahoo_ticker: str):
     tickers = [t.strip() for t in yahoo_ticker.split(",") if t.strip()]
 
     for tk in tickers:
-        # ★★ ⓪ CME Group 公開API (futures only, 本家サイトと完全整合)
+        # ★★★ ⓪ TradingView Scanner API (埋め込みチャートと完全同期・最優先)
+        # OANDA:NAS100USD など、チャートに使っているCFDシンボルそのものを直接叩く。
+        # 「チャートで動いているのにバッジが古い」現象が原理的に起きない。
+        # 認証不要、24h配信、futures/CFD/FXすべて対応。
+        # _TV_SYMBOL_MAP に登録のないティッカーは (None, None) で即時通過。
+        last_close, prev_close = _fetch_tradingview_quote(tk)
+        if last_close and prev_close and prev_close > 0:
+            price_str, pct_str, color = _format_result(last_close, prev_close)
+            _PCT_CACHE[cache_key] = (now_ts, price_str, pct_str, color)
+            return price_str, pct_str, color
+
+        # ★★ ① CME Group 公開API (futures only, 本家サイトと完全整合)
         # cmegroup.com の公式ページが表示している値そのものを返す。
         # Memorial Day等の米国祝日でも Globex 取引中なら確実に最新値を返す。
         # _CME_PRODUCT_IDS に登録のないティッカー(^N225, USDJPY=X等)は
@@ -2974,7 +3066,7 @@ def _calc_prev_close_pct(yahoo_ticker: str):
             _PCT_CACHE[cache_key] = (now_ts, price_str, pct_str, color)
             return price_str, pct_str, color
 
-        # ★ ① Yahoo Direct API (v8 chart の meta.regularMarketPrice = リアルタイム値)
+        # ★ ② Yahoo Direct API (v8 chart の meta.regularMarketPrice = リアルタイム値)
         # これが最も信頼できる。取引中の最新値を返す。
         last_close, prev_close = _fetch_yahoo_direct(tk)
         if last_close and prev_close and prev_close > 0:
