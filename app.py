@@ -2707,10 +2707,13 @@ st.markdown("<hr />", unsafe_allow_html=True)
 #
 # 各エントリ: (表示ラベル, TradingViewシンボル, ウィジェット種別, Yahoo Tickerで前営業日比計算)
 # Yahoo Ticker: ^N225/^NDX (現物=休場日は動かない) ではなく CME先物 (≒24h動く) を採用
+#   NIY=F = CME Nikkei 225 Yen Futures (円建て、ほぼ24h)
+#   NQ=F  = CME E-mini NASDAQ-100 Futures (USD建て、ほぼ24h)
+#   JPY=X = USD/JPY スポット (24h)
 _CHART_SPECS = [
-    ("日経平均(24h CFD)",     "OANDA:JP225USD",     "overview", "NKD=F"),   # CME Nikkei225 USD先物 (≒24h)
-    ("NASDAQ100(24h CFD)",    "OANDA:NAS100USD",    "overview", "NQ=F"),    # CME E-mini NASDAQ-100先物 (≒24h)
-    ("ドル円",                "FX:USDJPY",          "overview", "JPY=X"),   # FX (24h)
+    ("日経平均(24h CFD)",     "OANDA:JP225USD",     "overview", "NIY=F,^N225"),   # CME円建てNikkei先物→東証現物にフォールバック
+    ("NASDAQ100(24h CFD)",    "OANDA:NAS100USD",    "overview", "NQ=F,^NDX"),     # CME NASDAQ先物→現物にフォールバック
+    ("ドル円",                "FX:USDJPY",          "overview", "JPY=X"),         # FX (24h)
 ]
 
 
@@ -2718,26 +2721,32 @@ def _calc_prev_close_pct(yahoo_ticker: str):
     """Yahoo Finance から前営業日終値と現在値の比率を計算。
     返り値: (pct_str, color) or (None, None)。
 
+    yahoo_ticker は ',' 区切りで複数指定可。最初に取れたものを使う。
+    例: "NIY=F,^N225"  ← NIY=Fで取れなければ^N225にフォールバック
+
     例: ("+3.03%", "#16a34a") 緑色プラス / ("-0.25%", "#dc2626") 赤色マイナス
     """
-    try:
-        import yfinance as yf
-        ticker = yf.Ticker(yahoo_ticker)
-        hist = ticker.history(period="7d", interval="1d", auto_adjust=False)
-        if hist is None or len(hist) < 2:
-            return None, None
-        # 最新の終値
-        close_today = float(hist["Close"].iloc[-1])
-        # 前営業日(最新の1つ前)の終値
-        close_prev = float(hist["Close"].iloc[-2])
-        if close_prev == 0 or close_today == 0:
-            return None, None
-        pct = (close_today - close_prev) / close_prev * 100.0
-        sign = "+" if pct >= 0 else ""
-        color = "#16a34a" if pct >= 0 else "#dc2626"   # 緑/赤
-        return f"{sign}{pct:.2f}%", color
-    except Exception:
-        return None, None
+    tickers = [t.strip() for t in yahoo_ticker.split(",") if t.strip()]
+    for tk in tickers:
+        try:
+            import yfinance as yf
+            ticker = yf.Ticker(tk)
+            hist = ticker.history(period="7d", interval="1d", auto_adjust=False)
+            if hist is None or len(hist) < 2:
+                continue
+            # 最新の終値
+            close_today = float(hist["Close"].iloc[-1])
+            # 前営業日(最新の1つ前)の終値
+            close_prev = float(hist["Close"].iloc[-2])
+            if close_prev == 0 or close_today == 0:
+                continue
+            pct = (close_today - close_prev) / close_prev * 100.0
+            sign = "+" if pct >= 0 else ""
+            color = "#16a34a" if pct >= 0 else "#dc2626"   # 緑/赤
+            return f"{sign}{pct:.2f}%", color
+        except Exception:
+            continue
+    return None, None
 
 
 def _tv_widget_block(symbol: str, kind: str = "mini", color_theme: str = "light") -> str:
