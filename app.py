@@ -2720,7 +2720,15 @@ _CHART_SPECS = [
 _PCT_CACHE: Dict[str, Tuple[float, Optional[str], Optional[str], Optional[str]]] = {}
 _PCT_CACHE_TTL_SEC = 120   # 2分 (短くして古いキャッシュを残さない)
 _PCT_STALE_TTL_SEC = 3600  # 1時間: フェッチ全失敗時に古いキャッシュを使う上限
-_PCT_CACHE_VERSION = "v5"   # ← ロジック変更時にインクリメントして古いキャッシュ無効化 (v5: TradingView Scanner APIを最優先に)
+_PCT_CACHE_VERSION = "v6"   # ← ロジック変更時にインクリメントして古いキャッシュ無効化 (v6: TV URL修正+診断機能)
+
+# ★ NEW (v6): 各データソースの試行結果を記録するための診断辞書。
+# キー: "{yahoo_ticker}:{source}" (例: "NQ=F:tv", "NQ=F:cme")
+# 値: 文字列 ("OK", "HTTP403", "empty", "EXC:Timeout" 等)
+# UI下部の debug 折りたたみセクションに表示してデバッグに使う。
+_SOURCE_DIAG: Dict[str, str] = {}
+# ★ NEW (v6): 各銘柄で最終的に採用されたソース名 (例: "tv", "cme", "yahoo-v8")
+_FINAL_SOURCE: Dict[str, str] = {}
 
 # Stooq へのティッカーマッピング
 _STOOQ_MAP = {
@@ -2806,48 +2814,56 @@ def _fetch_tradingview_quote(yahoo_ticker: str):
     tv_symbol = _TV_SYMBOL_MAP.get(yahoo_ticker)
     if not tv_symbol:
         return None, None
-    try:
-        url = "https://scanner.tradingview.com/symbol"
-        body = {
-            "symbols": {"tickers": [tv_symbol], "query": {"types": []}},
-            "columns": ["close", "change", "change_abs"],
-        }
-        r = requests.post(
-            url,
-            json=body,
-            timeout=6,
-            headers={
-                "User-Agent": (
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                    "AppleWebKit/537.36 (KHTML, like Gecko) "
-                    "Chrome/122.0.0.0 Safari/537.36"
-                ),
-                "Accept": "application/json",
-                "Content-Type": "application/json",
-                "Origin": "https://www.tradingview.com",
-                "Referer": "https://www.tradingview.com/",
-            },
-        )
-        if r.status_code != 200:
-            return None, None
-        data = r.json()
-        rows = data.get("data") or []
-        if not rows:
-            return None, None
-        d = rows[0].get("d") or []
-        if len(d) < 3:
-            return None, None
-        # d[0] = 現在価格(close), d[1] = 変化率%, d[2] = 絶対変化額
-        if d[0] is None or d[2] is None:
-            return None, None
-        last = float(d[0])
-        change_abs = float(d[2])
-        prev = last - change_abs
-        if last > 0 and prev > 0:
-            return last, prev
-        return None, None
-    except Exception:
-        return None, None
+
+    # ★ 正しいエンドポイントは /scan (前回 /symbol で失敗)
+    # 複数の market 名を順に試す: scan (新汎用) → global → america → forex → cfd
+    urls_to_try = [
+        "https://scanner.tradingview.com/scan",
+        "https://scanner.tradingview.com/global/scan",
+        "https://scanner.tradingview.com/america/scan",
+        "https://scanner.tradingview.com/forex/scan",
+        "https://scanner.tradingview.com/cfd/scan",
+    ]
+    body = {
+        "symbols": {"tickers": [tv_symbol], "query": {"types": []}},
+        "columns": ["close", "change", "change_abs"],
+    }
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/122.0.0.0 Safari/537.36"
+        ),
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+        "Origin": "https://www.tradingview.com",
+        "Referer": "https://www.tradingview.com/",
+    }
+    for url in urls_to_try:
+        try:
+            r = requests.post(url, json=body, timeout=5, headers=headers)
+            if r.status_code != 200:
+                _SOURCE_DIAG[yahoo_ticker + ":tv"] = f"HTTP{r.status_code}"
+                continue
+            data = r.json()
+            rows = data.get("data") or []
+            if not rows:
+                _SOURCE_DIAG[yahoo_ticker + ":tv"] = "empty"
+                continue
+            d = rows[0].get("d") or []
+            if len(d) < 3 or d[0] is None or d[2] is None:
+                _SOURCE_DIAG[yahoo_ticker + ":tv"] = "bad-shape"
+                continue
+            last = float(d[0])
+            change_abs = float(d[2])
+            prev = last - change_abs
+            if last > 0 and prev > 0:
+                _SOURCE_DIAG[yahoo_ticker + ":tv"] = f"OK({url.split('/')[-2]})"
+                return last, prev
+        except Exception as e:
+            _SOURCE_DIAG[yahoo_ticker + ":tv"] = f"EXC:{type(e).__name__}"
+            continue
+    return None, None
 
 
 def _fetch_cme_quote(yahoo_ticker: str):
@@ -2868,12 +2884,32 @@ def _fetch_cme_quote(yahoo_ticker: str):
     product_id, venue = info
     try:
         url = f"https://www.cmegroup.com/CmeWS/mvc/Quotes/Future/{product_id}/{venue}"
-        r = _http_get_with_ua(url, timeout=6)
-        if r is None:
+        # CMEはAccept-LanguageやRefererを見ることがあるので強化したヘッダーを使う
+        try:
+            r = requests.get(url, headers={
+                "User-Agent": (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/122.0.0.0 Safari/537.36"
+                ),
+                "Accept": "application/json, text/plain, */*",
+                "Accept-Language": "en-US,en;q=0.9",
+                "Referer": "https://www.cmegroup.com/markets/equities.html",
+            }, timeout=6)
+        except Exception as e:
+            _SOURCE_DIAG[yahoo_ticker + ":cme"] = f"EXC:{type(e).__name__}"
             return None, None
-        data = r.json()
+        if r.status_code != 200:
+            _SOURCE_DIAG[yahoo_ticker + ":cme"] = f"HTTP{r.status_code}"
+            return None, None
+        try:
+            data = r.json()
+        except Exception:
+            _SOURCE_DIAG[yahoo_ticker + ":cme"] = "non-json"
+            return None, None
         quotes = data.get("quotes") or []
         if not quotes:
+            _SOURCE_DIAG[yahoo_ticker + ":cme"] = "empty"
             return None, None
 
         def _parse_num(v):
@@ -2910,9 +2946,12 @@ def _fetch_cme_quote(yahoo_ticker: str):
                 if ch is not None:
                     last = prev + ch
             if last is not None and prev is not None and last > 0 and prev > 0:
+                _SOURCE_DIAG[yahoo_ticker + ":cme"] = "OK"
                 return last, prev
+        _SOURCE_DIAG[yahoo_ticker + ":cme"] = "no-valid-quote"
         return None, None
-    except Exception:
+    except Exception as e:
+        _SOURCE_DIAG[yahoo_ticker + ":cme"] = f"EXC:{type(e).__name__}"
         return None, None
 
 
@@ -3053,6 +3092,7 @@ def _calc_prev_close_pct(yahoo_ticker: str):
         if last_close and prev_close and prev_close > 0:
             price_str, pct_str, color = _format_result(last_close, prev_close)
             _PCT_CACHE[cache_key] = (now_ts, price_str, pct_str, color)
+            _FINAL_SOURCE[yahoo_ticker] = f"tv:{tk}"
             return price_str, pct_str, color
 
         # ★★ ① CME Group 公開API (futures only, 本家サイトと完全整合)
@@ -3064,6 +3104,7 @@ def _calc_prev_close_pct(yahoo_ticker: str):
         if last_close and prev_close and prev_close > 0:
             price_str, pct_str, color = _format_result(last_close, prev_close)
             _PCT_CACHE[cache_key] = (now_ts, price_str, pct_str, color)
+            _FINAL_SOURCE[yahoo_ticker] = f"cme:{tk}"
             return price_str, pct_str, color
 
         # ★ ② Yahoo Direct API (v8 chart の meta.regularMarketPrice = リアルタイム値)
@@ -3072,6 +3113,7 @@ def _calc_prev_close_pct(yahoo_ticker: str):
         if last_close and prev_close and prev_close > 0:
             price_str, pct_str, color = _format_result(last_close, prev_close)
             _PCT_CACHE[cache_key] = (now_ts, price_str, pct_str, color)
+            _FINAL_SOURCE[yahoo_ticker] = f"yahoo-v8:{tk}"
             return price_str, pct_str, color
 
         # ② yfinance.fast_info (ライブラリ経由・リアルタイム値)
@@ -3084,6 +3126,7 @@ def _calc_prev_close_pct(yahoo_ticker: str):
             if last and prev and prev > 0 and last > 0:
                 price_str, pct_str, color = _format_result(last, prev)
                 _PCT_CACHE[cache_key] = (now_ts, price_str, pct_str, color)
+                _FINAL_SOURCE[yahoo_ticker] = f"yfinance-fast:{tk}"
                 return price_str, pct_str, color
         except Exception:
             pass
@@ -3093,6 +3136,7 @@ def _calc_prev_close_pct(yahoo_ticker: str):
         if last_close and prev_close and prev_close > 0:
             price_str, pct_str, color = _format_result(last_close, prev_close)
             _PCT_CACHE[cache_key] = (now_ts, price_str, pct_str, color)
+            _FINAL_SOURCE[yahoo_ticker] = f"stooq:{tk}"
             return price_str, pct_str, color
 
         # ④ yfinance.history (日足のみ・取引中はラスト確定終値しか取れず誤計算するので最後の手段)
@@ -3107,6 +3151,7 @@ def _calc_prev_close_pct(yahoo_ticker: str):
                 if close_prev > 0 and close_today > 0 and close_today != close_prev:
                     price_str, pct_str, color = _format_result(close_today, close_prev)
                     _PCT_CACHE[cache_key] = (now_ts, price_str, pct_str, color)
+                    _FINAL_SOURCE[yahoo_ticker] = f"yfinance-hist:{tk}"
                     return price_str, pct_str, color
         except Exception:
             pass
@@ -3115,8 +3160,10 @@ def _calc_prev_close_pct(yahoo_ticker: str):
     if cached is not None:
         ts, price_str, pct_str, color = cached
         if price_str is not None and (now_ts - ts) < _PCT_STALE_TTL_SEC:
+            _FINAL_SOURCE[yahoo_ticker] = "stale-cache"
             return price_str, pct_str, color
 
+    _FINAL_SOURCE[yahoo_ticker] = "FAILED-ALL"
     _PCT_CACHE[cache_key] = (now_ts, None, None, None)
     return None, None, None
 
@@ -3347,6 +3394,34 @@ except Exception:
     pass  # 既存チャート・ニュース取得には一切影響させない
 
 components.html(_charts_html, height=270)
+
+# ★ NEW (v6): データソース診断 (折りたたみ、デフォルト閉)
+# 「NASDAQ100だけ古い値が出る」問題を切り分けるためのデバッグ情報。
+# 各銘柄について、TradingView / CME / Yahoo 等のうちどのソースから取れたかを表示。
+try:
+    with st.expander("🔧 データソース診断 (デバッグ用)", expanded=False):
+        st.caption(
+            "下段3チャートのバッジ値が、どのデータソースから取れたかを表示します。"
+            "TradingView Scanner や CME が `OK` ならそれが採用、それ以外なら Yahoo にフォールバック。"
+        )
+        # 採用されたソース
+        if _FINAL_SOURCE:
+            st.markdown("**最終採用ソース**")
+            st.code(
+                "\n".join(f"{k:32s} → {v}" for k, v in _FINAL_SOURCE.items()),
+                language=None,
+            )
+        # 各ソースの試行結果
+        if _SOURCE_DIAG:
+            st.markdown("**各データソースの試行結果**")
+            st.code(
+                "\n".join(f"{k:32s} → {v}" for k, v in sorted(_SOURCE_DIAG.items())),
+                language=None,
+            )
+        if not _FINAL_SOURCE and not _SOURCE_DIAG:
+            st.caption("(まだフェッチされていません。下段チャートが描画されるまで待ってください)")
+except Exception:
+    pass  # 診断UIで例外が出ても本体に影響させない
 
 # -----------------------------
 # Render: 常に「All（全部まとめ）」のニュース一覧のみ表示
