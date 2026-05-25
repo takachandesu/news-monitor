@@ -2705,9 +2705,9 @@ st.markdown("<hr />", unsafe_allow_html=True)
 #                                          "OANDA:NAS100USD" / "NASDAQ:NDX" (US時間のみ)
 #   ドル円:           "FX:USDJPY"        → "OANDA:USDJPY" / "FX_IDC:USDJPY"
 _CHART_SPECS = [
-    ("日経平均（24h CFD）",  "OANDA:JP225USD",   "overview"),  # 日本株価指数（CFD、ほぼ24h リアルタイム）
-    ("NASDAQ100先物",         "FOREXCOM:NAS100",  "overview"),  # 米ハイテク株指数先物
-    ("ドル円",                "FX:USDJPY",        "overview"),  # USD/JPY
+    ("日経平均（24h CFD）",   "OANDA:JP225USD",     "overview"),  # 日本株価指数（CFD、ほぼ24h リアルタイム）
+    ("NASDAQ100（24h CFD）",  "OANDA:NAS100USD",    "overview"),  # 米ハイテク株指数CFD（24h、土日も動く）
+    ("ドル円",                "FX:USDJPY",          "overview"),  # USD/JPY
 ]
 
 
