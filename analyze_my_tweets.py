@@ -4,6 +4,11 @@ analyze_my_tweets.py
 @moo_stock の過去ツイートを分析し、IMPRESSION_THRESHOLD 閲覧以上の投稿から
 頻出単語（名詞）を抽出して keywords.json に保存する。
 
+★ 2026/05/25 改修 ★
+  - リプライ（@始まり / isReply）と RT を除外
+  - 同じテキストのツイートは重複排除（最高impを残す）
+  → 速報ツイートの傾向だけが keywords.json に反映されるようにする
+
 このスクリプトは X 自動投稿のフロー（post_to_x.py）には一切干渉しない。
 単独で実行され、keywords.json を生成するだけ。
 post_to_x.py がそれをどう使うかはフェーズ3で実装する。
@@ -144,6 +149,61 @@ def get_impression_count(tweet: Dict) -> int:
     return -1
 
 
+# ─── 2026/05/25 追加: クリーニング用ヘルパー ───
+
+def normalize_text(text: str) -> str:
+    """重複判定用にテキストを正規化（前後トリム + 連続空白を1つに）。"""
+    return " ".join((text or "").split()).strip()
+
+
+def is_reply_or_retweet(tweet: Dict) -> bool:
+    """リプライまたはリツイートを判定。post_to_x.py の同名関数と同じ思想。"""
+    if tweet.get("isReply"):
+        return True
+    if tweet.get("retweeted_tweet"):
+        return True
+    text = (tweet.get("text") or "").lstrip(" \t\r\n\"'＂　")
+    if text.startswith("RT @"):
+        return True
+    # @ から始まる ＝ 誰かへの会話 → 速報ではない
+    if text.startswith("@"):
+        return True
+    return False
+
+
+def clean_tweets(tweets: List[Dict]) -> Tuple[List[Dict], int, int]:
+    """リプライ/RT除外 + 重複テキスト排除（最高impを残す）。
+    Returns: (cleaned_tweets, removed_replies, removed_duplicates)
+    """
+    # 1. リプライ・RT除外
+    non_reply: List[Dict] = []
+    reply_count = 0
+    for t in tweets:
+        if is_reply_or_retweet(t):
+            reply_count += 1
+            continue
+        non_reply.append(t)
+
+    # 2. 同じテキストの重複を排除（最高impを残す）
+    by_text: Dict[str, Dict] = {}
+    dup_count = 0
+    for t in non_reply:
+        key = normalize_text(t.get("text") or "")
+        if not key:
+            continue
+        existing = by_text.get(key)
+        if existing is None:
+            by_text[key] = t
+        else:
+            ex_imp = get_impression_count(existing)
+            cur_imp = get_impression_count(t)
+            if cur_imp > ex_imp:
+                by_text[key] = t
+            dup_count += 1
+
+    return list(by_text.values()), reply_count, dup_count
+
+
 def filter_popular(tweets: List[Dict], threshold: int) -> Tuple[List[Dict], int]:
     """threshold 閲覧以上のツイートを抽出。
     Returns: (popular_tweets, impression_count_取れなかった件数)
@@ -236,8 +296,13 @@ def main() -> int:
         log("[ERR] ツイートが1件も取得できなかった")
         return 1
 
+    # 1.5. ★ リプライ/RT除外 + 重複排除（2026/05/25 追加）
+    cleaned, reply_count, dup_count = clean_tweets(tweets)
+    log(f"[INFO] クリーニング: リプライ/RT除外 {reply_count}件, 重複排除 {dup_count}件")
+    log(f"[INFO] クリーニング後の分析対象: {len(cleaned)}件")
+
     # 2. 閲覧数フィルタ
-    popular, no_imp = filter_popular(tweets, args.threshold)
+    popular, no_imp = filter_popular(cleaned, args.threshold)
 
     log("")
     log("══════════════════════════════════════════════")
@@ -245,20 +310,23 @@ def main() -> int:
     log("══════════════════════════════════════════════")
     log(f"  期間            : 過去{args.days}日")
     log(f"  取得ツイート数  : {len(tweets)}")
+    log(f"  リプライ/RT除外 : {reply_count}件")
+    log(f"  重複排除        : {dup_count}件")
+    log(f"  分析対象        : {len(cleaned)}件")
     log(f"  imp取得失敗     : {no_imp}件 ← 多いとTwitterAPI.io側で取れない")
     log(f"  {args.threshold}閲覧以上 : {len(popular)}件")
     log("")
 
     # impression_countが取れなかった割合をチェック
-    if no_imp == len(tweets):
+    if no_imp == len(cleaned) and len(cleaned) > 0:
         log("[WARN] !!!!! 全ツイートで impression_count が取れていない !!!!!")
         log("[WARN] TwitterAPI.io が閲覧数を返さない仕様の可能性。")
         log("[WARN] X 公式 API を使う必要があるかも。")
 
     if not popular:
         log("[WARN] 閾値以上のツイートが見つからなかった")
-        log("[INFO] フォールバック: 全ツイートで単語分析を実施")
-        popular = tweets
+        log("[INFO] フォールバック: クリーニング後の全ツイートで単語分析を実施")
+        popular = cleaned
 
     # 3. 200+ツイートTop10をレポート
     log("─── 閲覧数Top10 ───")
@@ -280,6 +348,9 @@ def main() -> int:
     # 5. 保存
     stats = {
         "total_tweets_fetched": len(tweets),
+        "removed_replies": reply_count,
+        "removed_duplicates": dup_count,
+        "cleaned_tweets_count": len(cleaned),
         "popular_tweets_count": len(popular),
         "impression_unavailable_count": no_imp,
         "analysis_days": args.days,
