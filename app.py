@@ -2711,61 +2711,187 @@ st.markdown("<hr />", unsafe_allow_html=True)
 #   NQ=F  = CME E-mini NASDAQ-100 Futures (USD建て、ほぼ24h)
 #   JPY=X = USD/JPY スポット (24h)
 _CHART_SPECS = [
-    ("日経平均(24h CFD)",     "OANDA:JP225USD",     "overview", "NIY=F,^N225"),   # CME円建てNikkei先物→東証現物にフォールバック
-    ("NASDAQ100(24h CFD)",    "OANDA:NAS100USD",    "overview", "NQ=F,^NDX"),     # CME NASDAQ先物→現物にフォールバック
-    ("ドル円",                "FX:USDJPY",          "overview", "JPY=X"),         # FX (24h)
+    ("日経平均(24h CFD)",     "OANDA:JP225USD",     "overview", "^N225,NKD=F,NIY=F"),     # 東証現物→CME USD先物→円先物
+    ("NASDAQ100(24h CFD)",    "OANDA:NAS100USD",    "overview", "NQ=F,^NDX,^IXIC"),       # CME NASDAQ先物→現物→Composite
+    ("ドル円",                "FX:USDJPY",          "overview", "USDJPY=X,JPY=X"),        # USD/JPY
 ]
 
 
 _PCT_CACHE: Dict[str, Tuple[float, Optional[str], Optional[str], Optional[str]]] = {}
 _PCT_CACHE_TTL_SEC = 300   # 5分
+_PCT_STALE_TTL_SEC = 3600  # 1時間: フェッチ全失敗時に古いキャッシュを使う上限
+
+# Stooq へのティッカーマッピング
+_STOOQ_MAP = {
+    "^N225":    "^nkx",       # 日経平均
+    "NKD=F":    "nkd.f",
+    "NIY=F":    "niy.f",
+    "NQ=F":     "nq.f",       # CME E-mini NASDAQ-100
+    "^NDX":     "^ndx",       # NASDAQ-100 現物
+    "^IXIC":    "^ixic",      # NASDAQ Composite
+    "USDJPY=X": "usdjpy",
+    "JPY=X":    "usdjpy",
+}
+
+
+def _http_get_with_ua(url: str, timeout: int = 6):
+    """User-Agent付きで HTTP GET。失敗時は None"""
+    try:
+        r = requests.get(url, headers={
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/122.0.0.0 Safari/537.36"
+            ),
+            "Accept": "*/*",
+        }, timeout=timeout)
+        if r.status_code == 200:
+            return r
+    except Exception:
+        pass
+    return None
+
+
+def _fetch_yahoo_direct(ticker: str):
+    """Yahoo Finance 公開API を直接叩いて (last_close, prev_close) を返す"""
+    try:
+        url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}?interval=1d&range=7d"
+        r = _http_get_with_ua(url)
+        if r is None:
+            return None, None
+        data = r.json()
+        result = data.get("chart", {}).get("result")
+        if not result:
+            return None, None
+        quote = result[0].get("indicators", {}).get("quote", [{}])[0]
+        closes = quote.get("close", [])
+        # None を除外
+        valid = [c for c in closes if c is not None]
+        if len(valid) < 2:
+            return None, None
+        return float(valid[-1]), float(valid[-2])
+    except Exception:
+        return None, None
+
+
+def _fetch_stooq(ticker: str):
+    """stooq.com から CSV を取って (last_close, prev_close) を返す"""
+    try:
+        stooq_sym = _STOOQ_MAP.get(ticker, ticker.lower())
+        url = f"https://stooq.com/q/d/l/?s={stooq_sym}&i=d"
+        r = _http_get_with_ua(url)
+        if r is None:
+            return None, None
+        text = (r.text or "").strip()
+        lines = text.split("\n")
+        if len(lines) < 3:    # ヘッダー + 2行 必要
+            return None, None
+        # 最後の2行から終値を取る
+        # 形式: Date,Open,High,Low,Close,Volume
+        def _parse(line):
+            cols = line.split(",")
+            if len(cols) < 5:
+                return None
+            try:
+                return float(cols[4])   # Close
+            except ValueError:
+                return None
+        last = _parse(lines[-1])
+        prev = _parse(lines[-2])
+        if last is None or prev is None:
+            return None, None
+        return last, prev
+    except Exception:
+        return None, None
 
 
 def _calc_prev_close_pct(yahoo_ticker: str):
-    """Yahoo Finance から前営業日終値、現在値、変化率を取得。
-    返り値: (price_str, pct_str, color) or (None, None, None)。
+    """前営業日終値、現在値、変化率を取得。
+    複数データソースを試行してプライス表示を最優先する。
 
-    yahoo_ticker は ',' 区切りで複数指定可。最初に取れたものを使う。
-    例: "NIY=F,^N225"  ← NIY=Fで取れなければ^N225にフォールバック
+    取得経路 (順番):
+      ① yfinance.fast_info  (ライブラリ経由・高速)
+      ② yfinance.history    (ライブラリ経由・標準)
+      ③ Yahoo Direct API    (HTTP直接・ライブラリ非依存)
+      ④ stooq.com           (HTTP直接・別ソース)
+      ⑤ 古いキャッシュ (TTL内なら採用)
+
+    返り値: (price_str, pct_str, color) or (None, None, None)
     """
-    # メモリキャッシュ (5分有効)
     now_ts = time.time()
     cached = _PCT_CACHE.get(yahoo_ticker)
     if cached is not None:
         ts, price_str, pct_str, color = cached
-        if (now_ts - ts) < _PCT_CACHE_TTL_SEC:
+        # フレッシュキャッシュ
+        if (now_ts - ts) < _PCT_CACHE_TTL_SEC and price_str is not None:
             return price_str, pct_str, color
 
+    def _format_price(v: float) -> str:
+        if v >= 1000:
+            return f"{v:,.2f}"
+        elif v >= 10:
+            return f"{v:.3f}"
+        else:
+            return f"{v:.4f}"
+
+    def _format_result(close_today: float, close_prev: float):
+        pct = (close_today - close_prev) / close_prev * 100.0
+        sign = "+" if pct >= 0 else ""
+        color = "#16a34a" if pct >= 0 else "#dc2626"
+        return _format_price(close_today), f"{sign}{pct:.2f}%", color
+
     tickers = [t.strip() for t in yahoo_ticker.split(",") if t.strip()]
+
     for tk in tickers:
+        # ① yfinance.fast_info
+        try:
+            import yfinance as yf
+            ticker = yf.Ticker(tk)
+            fi = ticker.fast_info
+            last = float(fi.last_price) if fi.last_price is not None else None
+            prev = float(fi.previous_close) if fi.previous_close is not None else None
+            if last and prev and prev > 0 and last > 0:
+                price_str, pct_str, color = _format_result(last, prev)
+                _PCT_CACHE[yahoo_ticker] = (now_ts, price_str, pct_str, color)
+                return price_str, pct_str, color
+        except Exception:
+            pass
+
+        # ② yfinance.history
         try:
             import yfinance as yf
             ticker = yf.Ticker(tk)
             hist = ticker.history(period="7d", interval="1d", auto_adjust=False)
-            if hist is None or len(hist) < 2:
-                continue
-            # 最新の終値（= 現在価格相当）
-            close_today = float(hist["Close"].iloc[-1])
-            # 前営業日(最新の1つ前)の終値
-            close_prev = float(hist["Close"].iloc[-2])
-            if close_prev == 0 or close_today == 0:
-                continue
-            pct = (close_today - close_prev) / close_prev * 100.0
-            sign = "+" if pct >= 0 else ""
-            color = "#16a34a" if pct >= 0 else "#dc2626"   # 緑/赤
-            pct_str = f"{sign}{pct:.2f}%"
-            # 価格フォーマット (大きい数字はカンマ付き)
-            if close_today >= 1000:
-                price_str = f"{close_today:,.2f}"
-            elif close_today >= 10:
-                price_str = f"{close_today:.3f}"
-            else:
-                price_str = f"{close_today:.4f}"
+            if hist is not None and len(hist) >= 2:
+                close_today = float(hist["Close"].iloc[-1])
+                close_prev = float(hist["Close"].iloc[-2])
+                if close_prev > 0 and close_today > 0:
+                    price_str, pct_str, color = _format_result(close_today, close_prev)
+                    _PCT_CACHE[yahoo_ticker] = (now_ts, price_str, pct_str, color)
+                    return price_str, pct_str, color
+        except Exception:
+            pass
+
+        # ③ Yahoo Direct API (HTTP)
+        last_close, prev_close = _fetch_yahoo_direct(tk)
+        if last_close and prev_close and prev_close > 0:
+            price_str, pct_str, color = _format_result(last_close, prev_close)
             _PCT_CACHE[yahoo_ticker] = (now_ts, price_str, pct_str, color)
             return price_str, pct_str, color
-        except Exception:
-            continue
-    # 全部失敗
+
+        # ④ stooq.com (HTTP)
+        last_close, prev_close = _fetch_stooq(tk)
+        if last_close and prev_close and prev_close > 0:
+            price_str, pct_str, color = _format_result(last_close, prev_close)
+            _PCT_CACHE[yahoo_ticker] = (now_ts, price_str, pct_str, color)
+            return price_str, pct_str, color
+
+    # ⑤ 全部失敗 → 古いキャッシュ採用 (1時間以内なら表示)
+    if cached is not None:
+        ts, price_str, pct_str, color = cached
+        if price_str is not None and (now_ts - ts) < _PCT_STALE_TTL_SEC:
+            return price_str, pct_str, color
+
     _PCT_CACHE[yahoo_ticker] = (now_ts, None, None, None)
     return None, None, None
 
