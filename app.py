@@ -2720,7 +2720,7 @@ _CHART_SPECS = [
 _PCT_CACHE: Dict[str, Tuple[float, Optional[str], Optional[str], Optional[str]]] = {}
 _PCT_CACHE_TTL_SEC = 120   # 2分 (短くして古いキャッシュを残さない)
 _PCT_STALE_TTL_SEC = 3600  # 1時間: フェッチ全失敗時に古いキャッシュを使う上限
-_PCT_CACHE_VERSION = "v6"   # ← ロジック変更時にインクリメントして古いキャッシュ無効化 (v6: TV URL修正+診断機能)
+_PCT_CACHE_VERSION = "v7"   # v7: TVシンボル候補を複数試行 (CME_MINI:NQ1!, CAPITALCOM:US100 等)
 
 # ★ NEW (v6): 各データソースの試行結果を記録するための診断辞書。
 # キー: "{yahoo_ticker}:{source}" (例: "NQ=F:tv", "NQ=F:cme")
@@ -2760,23 +2760,67 @@ _CME_PRODUCT_IDS = {
 }
 
 
-# ★ NEW (v5): TradingView Scanner API 用シンボルマッピング
-# 各 Yahoo ティッカーに対応する TradingView シンボル (= 埋め込みチャートで実際に表示しているもの)
-# Scanner API でこのシンボルを叩くと、チャート上の数字と完全に一致する値が返る。
-# つまり「チャートが動いているのにバッジが古い」現象が原理的に起きない最強の整合性。
+# ★ NEW (v7): TradingView Scanner API 用シンボルマッピング (複数候補)
+# 診断ログから判明: /global/scan は到達可能だが、シンボル形式によって empty が返る。
+# 各Yahooティッカーに対して [(symbol, market), ...] のリストを定義し、順番に試す。
+# market = 'futures' / 'cfd' / 'forex' / 'global' / 'america' のいずれか。
 _TV_SYMBOL_MAP = {
-    # NASDAQ系: OANDA:NAS100USD は CME先物とほぼ同じ動き、24h配信
-    "NQ=F":     "OANDA:NAS100USD",
-    "MNQ=F":    "OANDA:NAS100USD",
-    "^NDX":     "OANDA:NAS100USD",
-    "^IXIC":    "OANDA:NAS100USD",
-    # 日経系: OANDA:JP225USD は CME先物相当
-    "^N225":    "OANDA:JP225USD",
-    "NKD=F":    "OANDA:JP225USD",
-    "NIY=F":    "OANDA:JP225USD",
-    # ドル円: FX:USDJPY は24h
-    "USDJPY=X": "FX:USDJPY",
-    "JPY=X":    "FX:USDJPY",
+    # NASDAQ系: futures が一番確実、次に CFD、最後に現物
+    "NQ=F": [
+        ("CME_MINI:NQ1!",        "futures"),   # 連続限月先物 (front-month continuous)
+        ("CME_MINI:NQM2026",     "futures"),   # 2026年6月限 明示
+        ("CAPITALCOM:US100",     "cfd"),       # Capital.com の US100 CFD
+        ("OANDA:NAS100USD",      "cfd"),       # OANDA CFD
+        ("FOREXCOM:NSXUSD",      "cfd"),       # FOREX.com
+        ("PEPPERSTONE:NAS100",   "cfd"),
+        ("TVC:NDX",              "global"),    # TV指数版
+    ],
+    "MNQ=F": [
+        ("CME_MINI:MNQ1!",       "futures"),
+        ("CME_MINI:NQ1!",        "futures"),
+        ("CAPITALCOM:US100",     "cfd"),
+        ("OANDA:NAS100USD",      "cfd"),
+    ],
+    "^NDX": [
+        ("CME_MINI:NQ1!",        "futures"),   # 現物指数の代わりに先物を使う(休場日対策)
+        ("NASDAQ:NDX",           "america"),
+        ("TVC:NDX",              "global"),
+        ("OANDA:NAS100USD",      "cfd"),
+    ],
+    "^IXIC": [
+        ("CME_MINI:NQ1!",        "futures"),
+        ("NASDAQ:IXIC",          "america"),
+        ("TVC:IXIC",             "global"),
+    ],
+    # 日経系: 同じ思想で先物→CFD→現物
+    "^N225": [
+        ("OSE:NK2251!",          "futures"),   # 大阪取引所 日経225先物 連続限月
+        ("CME:NKD1!",            "futures"),   # CME 日経USD先物
+        ("OANDA:JP225USD",       "cfd"),
+        ("CAPITALCOM:J225",      "cfd"),
+        ("TVC:NI225",            "global"),
+        ("INDEX:NKY",            "global"),
+    ],
+    "NKD=F": [
+        ("CME:NKD1!",            "futures"),
+        ("OANDA:JP225USD",       "cfd"),
+        ("CAPITALCOM:J225",      "cfd"),
+    ],
+    "NIY=F": [
+        ("CME:NIY1!",            "futures"),
+        ("OSE:NK2251!",          "futures"),
+        ("OANDA:JP225JPY",       "cfd"),
+    ],
+    # ドル円: global で OK が確認できているのでそのまま
+    "USDJPY=X": [
+        ("FX:USDJPY",            "global"),
+        ("OANDA:USDJPY",         "forex"),
+        ("FX_IDC:USDJPY",        "global"),
+    ],
+    "JPY=X": [
+        ("FX:USDJPY",            "global"),
+        ("OANDA:USDJPY",         "forex"),
+    ],
 }
 
 
@@ -2811,23 +2855,10 @@ def _fetch_tradingview_quote(yahoo_ticker: str):
 
     返り値: (last, prev_close) or (None, None)
     """
-    tv_symbol = _TV_SYMBOL_MAP.get(yahoo_ticker)
-    if not tv_symbol:
+    candidates = _TV_SYMBOL_MAP.get(yahoo_ticker)
+    if not candidates:
         return None, None
 
-    # ★ 正しいエンドポイントは /scan (前回 /symbol で失敗)
-    # 複数の market 名を順に試す: scan (新汎用) → global → america → forex → cfd
-    urls_to_try = [
-        "https://scanner.tradingview.com/scan",
-        "https://scanner.tradingview.com/global/scan",
-        "https://scanner.tradingview.com/america/scan",
-        "https://scanner.tradingview.com/forex/scan",
-        "https://scanner.tradingview.com/cfd/scan",
-    ]
-    body = {
-        "symbols": {"tickers": [tv_symbol], "query": {"types": []}},
-        "columns": ["close", "change", "change_abs"],
-    }
     headers = {
         "User-Agent": (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -2839,30 +2870,42 @@ def _fetch_tradingview_quote(yahoo_ticker: str):
         "Origin": "https://www.tradingview.com",
         "Referer": "https://www.tradingview.com/",
     }
-    for url in urls_to_try:
+    attempts = []  # 各試行の結果ログ
+    for tv_symbol, market in candidates:
+        url = f"https://scanner.tradingview.com/{market}/scan"
+        body = {
+            "symbols": {"tickers": [tv_symbol], "query": {"types": []}},
+            "columns": ["close", "change", "change_abs"],
+        }
         try:
             r = requests.post(url, json=body, timeout=5, headers=headers)
             if r.status_code != 200:
-                _SOURCE_DIAG[yahoo_ticker + ":tv"] = f"HTTP{r.status_code}"
+                attempts.append(f"{tv_symbol}@{market}=HTTP{r.status_code}")
                 continue
             data = r.json()
             rows = data.get("data") or []
             if not rows:
-                _SOURCE_DIAG[yahoo_ticker + ":tv"] = "empty"
+                attempts.append(f"{tv_symbol}@{market}=empty")
                 continue
             d = rows[0].get("d") or []
             if len(d) < 3 or d[0] is None or d[2] is None:
-                _SOURCE_DIAG[yahoo_ticker + ":tv"] = "bad-shape"
+                attempts.append(f"{tv_symbol}@{market}=bad-shape")
                 continue
             last = float(d[0])
             change_abs = float(d[2])
             prev = last - change_abs
             if last > 0 and prev > 0:
-                _SOURCE_DIAG[yahoo_ticker + ":tv"] = f"OK({url.split('/')[-2]})"
+                attempts.append(f"{tv_symbol}@{market}=OK")
+                _SOURCE_DIAG[yahoo_ticker + ":tv"] = (
+                    f"OK[{tv_symbol}@{market}] tried={len(attempts)}"
+                )
                 return last, prev
+            attempts.append(f"{tv_symbol}@{market}=zero-or-neg")
         except Exception as e:
-            _SOURCE_DIAG[yahoo_ticker + ":tv"] = f"EXC:{type(e).__name__}"
+            attempts.append(f"{tv_symbol}@{market}=EXC:{type(e).__name__}")
             continue
+    # 全敗 → 試行内容を診断ログに残す (最後の3個を表示)
+    _SOURCE_DIAG[yahoo_ticker + ":tv"] = "NG: " + " | ".join(attempts[-3:])
     return None, None
 
 
