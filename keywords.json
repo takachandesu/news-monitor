@@ -1,0 +1,94 @@
+{
+  "updated_at": 1779708536,
+  "updated_at_jst": "2026-05-25 20:28:56 JST",
+  "handle": "moo_stock",
+  "threshold": 200,
+  "stats": {
+    "total_tweets_fetched": 174,
+    "popular_tweets_count": 15,
+    "impression_unavailable_count": 0,
+    "analysis_days": 90
+  },
+  "keywords": [
+    {
+      "word": "先物",
+      "count": 15
+    },
+    {
+      "word": "ロング",
+      "count": 15
+    },
+    {
+      "word": "イラン",
+      "count": 13
+    },
+    {
+      "word": "コール",
+      "count": 10
+    },
+    {
+      "word": "sp",
+      "count": 10
+    },
+    {
+      "word": "アセマネ",
+      "count": 10
+    },
+    {
+      "word": "パキスタン",
+      "count": 5
+    },
+    {
+      "word": "himagyo",
+      "count": 5
+    },
+    {
+      "word": "買い",
+      "count": 5
+    },
+    {
+      "word": "ディーラー",
+      "count": 5
+    },
+    {
+      "word": "歴史",
+      "count": 5
+    },
+    {
+      "word": "高水準",
+      "count": 5
+    },
+    {
+      "word": "ナスダック",
+      "count": 5
+    },
+    {
+      "word": "主体",
+      "count": 5
+    },
+    {
+      "word": "解消",
+      "count": 5
+    },
+    {
+      "word": "ポジション",
+      "count": 5
+    },
+    {
+      "word": "会談",
+      "count": 4
+    },
+    {
+      "word": "議長",
+      "count": 3
+    },
+    {
+      "word": "陸軍",
+      "count": 3
+    },
+    {
+      "word": "参謀",
+      "count": 3
+    }
+  ]
+}
