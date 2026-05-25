@@ -18,6 +18,14 @@ GitHub Actions から10分おきに呼ばれる前提（環境変数で認証情
   そこで N回に1回だけURL付きフォーマットを使い、実効単価を大幅に下げる。
   URL_EVERY_N_POSTS=10 で実効単価は約 $0.0335/件 (URL毎回より約 6 倍安い)。
 
+★ キーワードベース優先投稿（2026/05/25 追加）★
+  keywords.json があれば、過去にバズった単語を多く含む候補を優先投稿する。
+  - 全アカウントの候補を集約 → 新しい順に MAX_TRANSLATE_PER_RUN 件だけ翻訳
+  - 翻訳済み本文に含まれるキーワード数でスコアリング
+  - スコア降順 → 同点なら新しい順でソート → 上から投稿チェック
+  - keywords.json が無ければスコアリング無効（=実質、新しい順で投稿）
+  - 翻訳コスト天井: MAX_TRANSLATE_PER_RUN=3 → 1回最大$0.003、月最大$8.6
+
 環境変数:
   TWITTERAPI_IO_KEY   TwitterAPI.io の API キー（既存と共用可）
   CLAUDE_API_KEY      Anthropic Claude API キー（既存と共用可）
@@ -71,6 +79,12 @@ ESTIMATED_COST_PER_POST_USD = (
     + COST_PER_PLAIN_POST_USD * (URL_EVERY_N_POSTS - 1) / URL_EVERY_N_POSTS
 )
 MONTHLY_BUDGET_USD = 5.0      # 月予算($) 超えたら停止
+
+# ─── キーワードベース優先投稿（2026/05/25 追加）───
+KEYWORDS_PATH = "keywords.json"
+MAX_TRANSLATE_PER_RUN = 3    # 1回の実行で翻訳する最大候補数（翻訳コスト天井）
+                              # 候補が多くてもこの件数までしか翻訳→スコアリングしない
+                              # コスト試算: $0.001/件 × 3 × 96回/日 × 30日 ≈ $8.6/月 上限
 
 # ═══════════════════════════════════════════════════════
 
@@ -478,6 +492,34 @@ def format_tweet(body: str, handle: str, include_url: bool) -> str:
 
 
 # ───────────────────────────────────────────────
+# キーワード読込・スコアリング（2026/05/25 追加）
+# ───────────────────────────────────────────────
+
+def load_keywords() -> List[str]:
+    """keywords.json から単語リストを返す。無ければ空リスト（後方互換）。"""
+    if not os.path.exists(KEYWORDS_PATH):
+        log(f"[INFO] {KEYWORDS_PATH} なし → スコアリング無効、新しい順で投稿")
+        return []
+    try:
+        with open(KEYWORDS_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        words = [k.get("word", "") for k in data.get("keywords", []) if isinstance(k, dict)]
+        words = [w for w in words if w]
+        log(f"[INFO] {KEYWORDS_PATH} 読込: {len(words)}語")
+        return words
+    except Exception as e:
+        log(f"[WARN] {KEYWORDS_PATH} 読込失敗: {type(e).__name__}: {e} → スコアリング無効")
+        return []
+
+
+def score_text(text: str, keywords: List[str]) -> int:
+    """テキストに keywords の語が何個含まれているかカウント。"""
+    if not keywords or not text:
+        return 0
+    return sum(1 for kw in keywords if kw in text)
+
+
+# ───────────────────────────────────────────────
 # X 公式 API での投稿
 # ───────────────────────────────────────────────
 
@@ -552,92 +594,149 @@ def main() -> int:
         access_token_secret=os.environ["X_ACCESS_SECRET"],
     )
 
-    # ── 各アカウントを処理
-    posts_this_run = 0
-    rate_limited = False
+    # ── キーワード読込（無ければスコアリング無効で従来動作）
+    keywords = load_keywords()
 
+    # ── 全アカウントから候補を集約
+    all_candidates: List[Dict] = []  # [{"tweet": ..., "acc": ...}, ...]
     for i, acc in enumerate(ACCOUNT_CONFIGS):
-        if posts_this_run >= MAX_POSTS_PER_RUN or rate_limited:
-            break
-
         if i > 0:
-            time.sleep(5)  # アカウント間でレート制限避け
-
+            time.sleep(5)  # アカウント間レート制限避け
         handle = acc["handle"]
         log(f"[INFO] @{handle} の取得開始")
         tweets, status = fetch_tweets_via_twitterapi_io(handle, twitterapi_key)
         log(f"[INFO] @{handle} status={status}, raw={len(tweets)}")
+        for t in tweets:
+            all_candidates.append({"tweet": t, "acc": acc})
 
-        # 古い順にソート（時系列で投稿するため）
-        tweets_sorted = sorted(tweets, key=lambda t: t.get("createdAt") or "")
+    log(f"[INFO] 全候補(生): {len(all_candidates)}件")
 
-        for t in tweets_sorted:
-            if posts_this_run >= MAX_POSTS_PER_RUN:
-                log(f"[INFO] 1回の上限({MAX_POSTS_PER_RUN}件)到達 → 中断")
-                break
+    # ── 適格な候補だけ残す（未投稿 / 非リプ / 非RT / フィルタ通過）
+    eligible: List[Dict] = []
+    for c in all_candidates:
+        t = c["tweet"]
+        acc = c["acc"]
+        tid = str(t.get("id") or "")
+        if not tid:
+            continue
+        if tid in posted_ids:
+            continue
+        text = t.get("text") or ""
+        if not text:
+            continue
+        if is_reply_or_retweet(t):
+            continue
+        if not passes_filter(text, acc["filter"]):
+            continue
+        eligible.append(c)
 
-            # ★ 投稿ごとに再判定（最小間隔・日次上限）
-            ok_each, reason_each = can_post_now(state)
-            if not ok_each:
-                log(f"[STOP] ループ内ガード: {reason_each}")
+    log(f"[INFO] 適格候補: {len(eligible)}件")
+
+    if not eligible:
+        log("[INFO] 投稿可能な新規候補なし")
+        state["posted_ids"] = list(posted_ids)
+        save_state(state)
+        return 0
+
+    # ── 新しい順にソート、上位 MAX_TRANSLATE_PER_RUN 件だけ翻訳（コスト天井）
+    eligible.sort(key=lambda c: c["tweet"].get("createdAt") or "", reverse=True)
+    to_process = eligible[:MAX_TRANSLATE_PER_RUN]
+    log(f"[INFO] 翻訳対象: 上位{len(to_process)}件（上限{MAX_TRANSLATE_PER_RUN}件）")
+
+    # ── 翻訳 + スコアリング
+    scored: List[Dict] = []
+    for c in to_process:
+        t = c["tweet"]
+        acc = c["acc"]
+        tid = str(t.get("id"))
+        text = t.get("text") or ""
+        first_line = text.split("\n", 1)[0].strip()
+        raw_body = first_line[:160] if first_line else text[:160]
+
+        # 翻訳
+        if acc["translate"]:
+            body_ja = translate_to_japanese(raw_body, claude_client)
+            if not looks_like_japanese(body_ja):
+                log(f"[SKIP] 翻訳失敗の可能性, tweet_id={tid}, body={raw_body[:50]}")
+                continue
+        else:
+            body_ja = raw_body
+
+        # 整形
+        body_clean = clean_for_post(body_ja)
+        if not body_clean:
+            continue
+
+        # スコアリング（キーワード含有数）
+        score = score_text(body_clean, keywords)
+        scored.append({
+            "tweet": t,
+            "acc": acc,
+            "body_clean": body_clean,
+            "score": score,
+            "created_at": t.get("createdAt") or "",
+        })
+
+    if not scored:
+        log("[INFO] 翻訳・整形後の候補が0件")
+        state["posted_ids"] = list(posted_ids)
+        save_state(state)
+        return 0
+
+    # ── スコア降順、同点なら新しい順でソート
+    #    Python の sort は stable なので、新しい順 → スコア降順 の順でかける
+    scored.sort(key=lambda c: c["created_at"], reverse=True)
+    scored.sort(key=lambda c: c["score"], reverse=True)
+
+    # ── スコアリング結果のログ
+    log(f"[INFO] スコアリング結果(降順, keywords={len(keywords)}語):")
+    for i, c in enumerate(scored, 1):
+        log(f"  {i}. score={c['score']} @{c['acc']['handle']} {c['body_clean'][:50]}")
+
+    # ── 上から順に投稿チェック → 最初に通った1件を投稿
+    posts_this_run = 0
+    rate_limited = False
+    for c in scored:
+        if posts_this_run >= MAX_POSTS_PER_RUN:
+            log(f"[INFO] 1回の上限({MAX_POSTS_PER_RUN}件)到達 → 中断")
+            break
+
+        # ★ 投稿ごとに再判定（最小間隔・日次上限）
+        ok_each, reason_each = can_post_now(state)
+        if not ok_each:
+            log(f"[STOP] ループ内ガード: {reason_each}")
+            rate_limited = True
+            break
+
+        t = c["tweet"]
+        tid = str(t.get("id"))
+        body_clean = c["body_clean"]
+        handle = c["acc"]["handle"]
+        score = c["score"]
+
+        # ★ URL付きにするかどうか判定
+        include_url = should_include_url(state)
+        tweet_text = format_tweet(body_clean, handle, include_url)
+        cost_tag = "URL付き($0.20)" if include_url else "URLなし($0.015)"
+
+        # 投稿
+        log(f"[POST] @{handle} src_id={tid} score={score} {cost_tag} body={body_clean[:50]}")
+        ok, info = post_to_x(tweet_text, x_client)
+
+        if ok:
+            posted_ids.add(tid)
+            posts_this_run += 1
+            _increment_post_count(state, with_url=include_url)
+            state["posted_ids"] = list(posted_ids)
+            save_state(state)
+            log(f"[OK]   posted, new_x_id={info} (累計{state['total_post_count']}件目)")
+            time.sleep(SLEEP_BETWEEN_POSTS)
+        else:
+            log(f"[ERR]  {info}")
+            if info.startswith("RateLimit"):
+                log("[INFO] レート制限のため今回は中断")
                 rate_limited = True
                 break
-
-            tid = str(t.get("id") or "")
-            if not tid:
-                continue
-            if tid in posted_ids:
-                continue
-
-            text = t.get("text") or ""
-            if not text:
-                continue
-            if is_reply_or_retweet(t):
-                continue
-            if not passes_filter(text, acc["filter"]):
-                continue
-
-            # 本文の1行目を切り出し
-            first_line = text.split("\n", 1)[0].strip()
-            raw_body = first_line[:160] if first_line else text[:160]
-
-            # 翻訳
-            if acc["translate"]:
-                body_ja = translate_to_japanese(raw_body, claude_client)
-                if not looks_like_japanese(body_ja):
-                    log(f"[SKIP] 翻訳失敗の可能性, tweet_id={tid}, body={raw_body[:50]}")
-                    continue
-            else:
-                body_ja = raw_body
-
-            # 整形
-            body_clean = clean_for_post(body_ja)
-            if not body_clean:
-                continue
-
-            # ★ URL付きにするかどうか判定
-            include_url = should_include_url(state)
-            tweet_text = format_tweet(body_clean, handle, include_url)
-            cost_tag = "URL付き($0.20)" if include_url else "URLなし($0.015)"
-
-            # 投稿
-            log(f"[POST] @{handle} src_id={tid} {cost_tag} body={body_clean[:50]}")
-            ok, info = post_to_x(tweet_text, x_client)
-
-            if ok:
-                posted_ids.add(tid)
-                posts_this_run += 1
-                _increment_post_count(state, with_url=include_url)
-                state["posted_ids"] = list(posted_ids)
-                save_state(state)
-                log(f"[OK]   posted, new_x_id={info} (累計{state['total_post_count']}件目)")
-                time.sleep(SLEEP_BETWEEN_POSTS)
-            else:
-                log(f"[ERR]  {info}")
-                if info.startswith("RateLimit"):
-                    log("[INFO] レート制限のため今回は中断")
-                    rate_limited = True
-                    break
 
     # ── 最終的に state を保存
     state["posted_ids"] = list(posted_ids)
