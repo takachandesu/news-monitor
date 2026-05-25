@@ -921,7 +921,7 @@ def render_synthetic_fx(data: Dict[str, Any]) -> None:
                 f'<div class="syn-sub">データ取得失敗・後ほど再試行</div>'
                 f'</div>'
             )
-    # 平日は土日行は出さない
+    # 平日は案内メッセージ (下で weekend_html_block を使用)
 
     # ================================================
     # 出力
@@ -950,13 +950,24 @@ def render_synthetic_fx(data: Dict[str, Any]) -> None:
         f'{src_label}</span>'
     ) if src_label else ""
 
+    # 平日に案内メッセージを表示するためのフォールバック
+    weekend_html_block = (
+        '<div class="syn-wrap syn-weekend-wrap" style="text-align:center;">'
+        '<div class="syn-weekend-title">📅 土日モード</div>'
+        '<div style="font-size:13px;color:#444;padding:10px 8px;">'
+        '日本時間の土曜 7:00am 〜 月曜 7:00am になると、'
+        '<b>土日ダウ</b>・<b>土日NASDAQ</b>・<b>土日原油</b>・<b>土日ドル円</b> が表示されます。'
+        '</div>'
+        '</div>'
+    )
+
     weekend_html = (
         f'<div class="syn-wrap syn-weekend-wrap">'
         f'<div class="syn-weekend-title">📅 土日モード ({now_jst}){badge}</div>'
         f'<div class="syn-weekend-subtitle">土日に動く為替と株価指数です。参考値です。</div>'
         f'<div class="syn-wrap" style="margin:0;">{weekend_row}</div>'
         f'</div>'
-    ) if weekend_row else ""
+    ) if weekend_row else weekend_html_block
 
     html = """
 <style>
