@@ -1,7 +1,7 @@
 name: Post breaking news to X
 on:
   schedule:
-    - cron: '2,17,33,47 * * * *'   # 毎時 :02, :17, :33, :47（15分おき）
+    - cron: '2,32 * * * *'   # 毎時 :02, :32（30分おき）
   workflow_dispatch:               # 手動実行も可能
 permissions:
   contents: write                  # state.json と sekai_data_url.txt を commit するため
