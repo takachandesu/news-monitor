@@ -145,11 +145,15 @@ def normalize_dt(dt: Optional[datetime]) -> Optional[datetime]:
     return dt
 
 
+# JST (UTC+9) タイムゾーン定数。見出しの時刻表示などで使用。
+JST = timezone(timedelta(hours=9))
+
+
 def fmt_dt(dt: Optional[datetime]) -> str:
     if not dt:
         return ""
     try:
-        return dt.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+        return dt.astimezone(JST).strftime("%Y-%m-%d %H:%M JST")
     except Exception:
         return ""
 
