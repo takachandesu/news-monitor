@@ -427,7 +427,11 @@ def fetch_nikkei225jp_news_all1() -> Dict[str, object]:
         for token in parts:
             if re.fullmatch(r"\d{4}/\d{2}/\d{2}\s+\d{2}:\d{2}", token):
                 try:
-                    published = datetime.strptime(token, "%Y/%m/%d %H:%M").replace(tzinfo=timezone.utc)
+                    # nikkei225jp.com の News_ALL1.js は JST 時刻を配信している
+                    # （例: ザイFX!「NY市場動向(午前10時台)」の元記事配信時刻 5/27 23:25 JST が
+                    # データ上 "2026/05/27 23:25" として入っている）。
+                    # ここを JST でタグ付けしないと、fmt_dt の JST 変換で +9時間ズレる。
+                    published = datetime.strptime(token, "%Y/%m/%d %H:%M").replace(tzinfo=JST)
                 except Exception:
                     published = None
                 break
