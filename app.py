@@ -427,7 +427,7 @@ def fetch_nikkei225jp_news_all1() -> Dict[str, object]:
         for token in parts:
             if re.fullmatch(r"\d{4}/\d{2}/\d{2}\s+\d{2}:\d{2}", token):
                 try:
-                    published = datetime.strptime(token, "%Y/%m/%d %H:%M").replace(tzinfo=timezone.utc)
+                    published = datetime.strptime(token, "%Y/%m/%d %H:%M").replace(tzinfo=JST)
                 except Exception:
                     published = None
                 break
@@ -758,7 +758,7 @@ def fetch_tbs_newsdig_bloomberg() -> List[Dict]:
                     dt = datetime(
                         int(m.group(1)), int(m.group(2)), int(m.group(3)),
                         int(m.group(4)), int(m.group(5)),
-                        tzinfo=timezone.utc,
+                        tzinfo=JST,
                     )
                     return dt
                 except Exception:
@@ -1955,7 +1955,7 @@ def fetch_sbi_fund_reports() -> List[Dict]:
                     try:
                         published = datetime(
                             int(m.group(1)), int(m.group(2)), int(m.group(3)),
-                            tzinfo=timezone.utc,
+                            tzinfo=JST,
                         )
                         break
                     except Exception:
