@@ -3,7 +3,7 @@ name: Post ADR to X
 on:
   schedule:
     # JST 07:30 火～土 = UTC 22:30 月～金
-    - cron: '30 22 * * 1-5'
+    - cron: '15 23 * * 1-5'
   workflow_dispatch:
 
 concurrency:
