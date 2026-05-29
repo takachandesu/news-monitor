@@ -1,5 +1,5 @@
 """
-日本株ADR乖離率ランキングを毎朝7:30 JSTにXに投稿するスクリプト。
+日本株ADR乖離率ランキングを毎朝Xに投稿するスクリプト。
 adr-data.json を取得 → ベスト4・ワースト4を1ツイートで投稿。
 """
 from __future__ import annotations
@@ -21,7 +21,7 @@ NAME_SHORT = {
     "三井住友フィナンシャルグループ": "三井住友FG",
     "三井住友トラストグループ": "三井住友信託",
     "みずほフィナンシャルグループ": "みずほFG",
-    "ソフトバンクグループ": "SBG",
+    "ソフトバンクグループ": "ソフトバンクG",
     "ファーストリテイリング": "ファストリ",
     "東京エレクトロン": "東エレク",
     "ニトリホールディングス": "ニトリ",
@@ -52,7 +52,7 @@ NAME_SHORT = {
     "信越化学工業": "信越化学",
     "住友電気工業": "住友電工",
     "住友金属鉱山": "住友金属鉱",
-    "三井金属鉱業": "三井金属",
+    "三井金属鉱業": "三井金属鉱",
     "中外製薬": "中外製薬",
     "リクルートHD": "リクルート",
     "ENEOSホールディングス": "ENEOS",
@@ -62,6 +62,10 @@ NAME_SHORT = {
     "ブリヂストン": "ブリヂストン",
     "Pan Pacific International": "パンパシ",
     "パン・パシフィックHD": "パンパシHD",
+    "スクウェア・エニックス": "スクエニ",
+    "コナミグループ": "コナミG",
+    "ヤマハ発動機": "ヤマハ発",
+    "リード・リアル・エステート": "リードリアル",
 }
 
 
@@ -77,7 +81,7 @@ def fetch_data():
     return r.json()
 
 
-def short_name(name, max_len=8):
+def short_name(name, max_len=10):
     """銘柄名を短く整形"""
     if name in NAME_SHORT:
         return NAME_SHORT[name]
@@ -86,13 +90,12 @@ def short_name(name, max_len=8):
     return name[:max_len]
 
 
-def format_line(rank, item):
-    """1行整形: '1. 6594 ニデック +14.61%'"""
-    code = item.get("jp_ticker", "----")
+def format_line(item):
+    """1行整形: '三井金属鉱業 +20.50%'"""
     name = short_name(item.get("name_jp", ""))
     pct = item.get("divergence_pct", 0.0)
     sign = "+" if pct >= 0 else ""
-    return f"{rank}. {code} {name} {sign}{pct:.2f}%"
+    return f"{name} {sign}{pct:.2f}%"
 
 
 def build_tweet(data):
@@ -100,20 +103,20 @@ def build_tweet(data):
     now = datetime.now(JST)
     date_str = f"{now.month}/{now.day}"
 
-    lines = [f"📊日本株ADR乖離率 {date_str}"]
+    lines = [f"今朝のADR動向 ({date_str})"]
 
     lines.append("")
-    lines.append("📈上昇TOP4")
-    for i, item in enumerate(data["best"][:4], 1):
-        lines.append(format_line(i, item))
+    lines.append("上がってる:")
+    for item in data["best"][:4]:
+        lines.append(format_line(item))
 
     lines.append("")
-    lines.append("📉下落TOP4")
-    for i, item in enumerate(data["worst"][:4], 1):
-        lines.append(format_line(i, item))
+    lines.append("下がってる:")
+    for item in data["worst"][:4]:
+        lines.append(format_line(item))
 
     lines.append("")
-    lines.append("詳細はプロフィール固定のWEBにて")
+    lines.append("詳しくはプロフィールのリンク🔗")
 
     return "\n".join(lines)
 
