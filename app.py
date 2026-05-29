@@ -832,6 +832,149 @@ def fetch_tbs_newsdig_bloomberg() -> List[Dict]:
 
 
 # ============================================================
+# ★ 追加: Yahoo!ニュース Bloomberg 記事一覧（"BBG"）
+#   https://news.yahoo.co.jp/media/bloom_st
+#
+#   Bloomberg 提供記事を新着順で取得する（HTMLスクレイピング方式）。
+#   ・source は "BBG" 固定（render_items 側で青字表示）。
+#   ・Yahoo! 由来URLだが、このソースだけは _drop_yahoo の除外対象から外す。
+#   ・表示時刻は Yahoo! が JST で出しているので tzinfo=JST を付ける
+#     （UTC扱いすると +9h ズレる。時刻ズレ対策メモ参照）。
+# ============================================================
+YAHOO_BBG_SOURCE = "BBG"
+YAHOO_BBG_LIST_URL = "https://news.yahoo.co.jp/media/bloom_st"
+# Yahoo! の記事URL: https://news.yahoo.co.jp/articles/{英数字ハッシュ}
+_YAHOO_ARTICLE_RE = re.compile(r"^https?://news\.yahoo\.co\.jp/articles/[0-9a-zA-Z]+")
+# タイトル末尾に付く配信時刻: 例) 5/14(木) 17:39
+_YAHOO_TIME_RE = re.compile(r"(\d{1,2})/(\d{1,2})\s*\([日月火水木金土]\)\s*(\d{1,2}):(\d{2})")
+# 相対時刻: 例) 3分前 / 1時間前
+_YAHOO_REL_MIN_RE = re.compile(r"(\d+)\s*分前")
+_YAHOO_REL_HOUR_RE = re.compile(r"(\d+)\s*時間前")
+# このページ内で「Bloomberg記事一覧」が終わる目印（以降はトピックス/ランキング等）
+_YAHOO_STOP_MARKERS = ("トピックス", "アクセスランキング", "ヤフコメランキング", "ニュース提供社")
+
+
+def _parse_yahoo_bbg_time(text: str) -> Optional[datetime]:
+    """
+    Yahoo! の見出し文字列から配信時刻を JST datetime として取り出す。
+    取れなければ None。
+    """
+    if not text:
+        return None
+    now_jst = datetime.now(tz=JST)
+
+    m = _YAHOO_TIME_RE.search(text)
+    if m:
+        mon, day, hh, mm = (int(g) for g in m.groups())
+        try:
+            cand = datetime(now_jst.year, mon, day, hh, mm, tzinfo=JST)
+            # 年が無い表記なので、未来日になったら前年と判断（年末年始対策）
+            if cand - now_jst > timedelta(days=1):
+                cand = cand.replace(year=now_jst.year - 1)
+            return cand
+        except ValueError:
+            return None
+
+    m = _YAHOO_REL_MIN_RE.search(text)
+    if m:
+        return now_jst - timedelta(minutes=int(m.group(1)))
+    m = _YAHOO_REL_HOUR_RE.search(text)
+    if m:
+        return now_jst - timedelta(hours=int(m.group(1)))
+    return None
+
+
+def fetch_yahoo_bloomberg() -> List[Dict]:
+    """
+    Yahoo!ニュースの Bloomberg 記事一覧ページから新着記事を取得して返す。
+    source は "BBG" 固定。
+    """
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/122.0.0.0 Safari/537.36"
+        ),
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "ja,en-US;q=0.9,en;q=0.8",
+        "Referer": "https://news.yahoo.co.jp/",
+        "Cache-Control": "no-cache",
+    }
+
+    items: List[Dict] = []
+    seen: set = set()
+
+    try:
+        from bs4 import BeautifulSoup
+    except Exception:
+        return items
+
+    # page=1, 2 を取得（newest 50件程度）。失敗ページは静かにスキップ。
+    for page in (1, 2):
+        url = YAHOO_BBG_LIST_URL if page == 1 else f"{YAHOO_BBG_LIST_URL}?page={page}"
+        try:
+            r = requests.get(url, headers=headers, timeout=15)
+            r.raise_for_status()
+            soup = BeautifulSoup(r.text, "html.parser")
+        except Exception:
+            continue
+
+        # ドキュメント順に走査し、ランキング/トピックス見出しに達したら以降は無視。
+        # （同じ /articles/ でもランキング欄の記事は Bloomberg ではないため）
+        stop = False
+        for el in soup.find_all(True):
+            if stop:
+                break
+
+            # 見出し系で停止マーカーに当たったら、その時点で本文リスト終了とみなす
+            name = el.name or ""
+            if name in ("h1", "h2", "h3", "section", "aside"):
+                htext = el.get_text(" ", strip=True)[:40]
+                if any(mark in htext for mark in _YAHOO_STOP_MARKERS):
+                    stop = True
+                    continue
+
+            if name != "a":
+                continue
+
+            href = el.get("href") or ""
+            if href.startswith("/"):
+                href = "https://news.yahoo.co.jp" + href
+            href = href.split("?")[0].split("#")[0]
+            if not _YAHOO_ARTICLE_RE.match(href):
+                continue
+            if href in seen:
+                continue
+
+            raw = el.get_text(" ", strip=True)
+            raw = re.sub(r"\s+", " ", raw or "").strip()
+            if not raw:
+                continue
+
+            published = _parse_yahoo_bbg_time(raw)
+
+            # タイトルから末尾の時刻表記・相対時刻を除去
+            title = _YAHOO_TIME_RE.sub("", raw)
+            title = _YAHOO_REL_MIN_RE.sub("", title)
+            title = _YAHOO_REL_HOUR_RE.sub("", title)
+            # 動画の長さ表記（例: 0:52）が末尾に残ることがあるので除去
+            title = re.sub(r"\s*\d{1,2}:\d{2}\s*$", "", title).strip()
+
+            if not is_probably_title(title) or len(title) < 8:
+                continue
+
+            seen.add(href)
+            items.append({
+                "source": YAHOO_BBG_SOURCE,
+                "title": title,
+                "url": href,
+                "published": published,
+            })
+
+    return dedupe(items)
+
+
+# ============================================================
 # ★ 追加: 日経新聞（Cookie認証）
 #
 # 使い方:
@@ -2088,6 +2231,7 @@ def render_items(items: List[Dict], limit: int, show_source: bool, show_time: bo
     rows_html = """
     <style>
     .news-title.is-breaking { color: #d32f2f; font-weight: bold; }
+    .news-title.is-bbg { color: #1976d2; font-weight: 600; }
     </style>
     """
     shown = 0
@@ -2113,7 +2257,12 @@ def render_items(items: List[Dict], limit: int, show_source: bool, show_time: bo
 
         # ★ タイトルはエスケープ（HTMLタグが含まれていてもプレーンに表示）
         title_html = _html_escape_local(title)
-        title_class = "news-title is-breaking" if is_breaking else "news-title"
+        if src == "BBG":
+            title_class = "news-title is-bbg"
+        elif is_breaking:
+            title_class = "news-title is-breaking"
+        else:
+            title_class = "news-title"
 
         rows_html += f"""
         <div class="news-row" style="border-bottom:1px solid rgba(128,128,128,0.15); padding:4px 0;">
@@ -2157,6 +2306,7 @@ def render_items(items: List[Dict], limit: int, show_source: bool, show_time: bo
             items_data.append({
                 "key": key, "title": title, "url": url, "meta": meta,
                 "is_breaking": is_breaking,
+                "is_bbg": (src == "BBG"),
             })
             shown += 1
 
@@ -2238,6 +2388,11 @@ def render_items(items: List[Dict], limit: int, show_source: bool, show_time: bo
             color: #d32f2f;
             font-weight: bold;
         }}
+        /* ★ BBG（Yahoo!経由Bloomberg）：青字 */
+        .ntitle.is-bbg {{
+            color: #1976d2;
+            font-weight: 600;
+        }}
         .nrow.is-new {{
             animation: flowDown 5s ease-out forwards;
             transform-origin: top;
@@ -2316,8 +2471,9 @@ def render_items(items: List[Dict], limit: int, show_source: bool, show_time: bo
             function makeRow(it, isNew) {{
                 const row = document.createElement('div');
                 row.className = 'nrow' + (isNew ? ' is-new' : '');
-                // ★ is_breaking のときは ntitle に is-breaking クラスを足す → 赤太字
-                const titleClass = it.is_breaking ? 'ntitle is-breaking' : 'ntitle';
+                // ★ is_bbg → 青字 / is_breaking → 赤太字
+                const titleClass = it.is_bbg ? 'ntitle is-bbg'
+                                 : (it.is_breaking ? 'ntitle is-breaking' : 'ntitle');
                 row.innerHTML =
                     '<div class="nbtn"><a href="' + esc(it.url) + '" target="_blank" rel="noopener noreferrer">Open</a></div>' +
                     '<div class="' + titleClass + '">' + esc(it.title) +
@@ -2382,6 +2538,12 @@ def fetch_all_sources(collector: BackgroundCollector) -> Dict[str, object]:
     # TBS NEWS DIG（Bloomberg提携記事一覧）
     tbs_bloomberg = fetch_tbs_newsdig_bloomberg()
 
+    # ★ Yahoo!ニュース Bloomberg 記事一覧（"BBG"・青字表示）
+    try:
+        yahoo_bbg = fetch_yahoo_bloomberg()
+    except Exception:
+        yahoo_bbg = []
+
     # ★ 読売新聞（政治・経済・海外） / 産経新聞（経済・政治）
     yomiuri = fetch_yomiuri()
     sankei  = fetch_sankei()
@@ -2398,6 +2560,7 @@ def fetch_all_sources(collector: BackgroundCollector) -> Dict[str, object]:
     wsj_ja            = collector.attach_first_seen(wsj_ja)
     nikkei225jp_items = collector.attach_first_seen(nikkei225jp_items)
     tbs_bloomberg     = collector.attach_first_seen(tbs_bloomberg)
+    yahoo_bbg         = collector.attach_first_seen(yahoo_bbg)
     yomiuri           = collector.attach_first_seen(yomiuri)
     sankei            = collector.attach_first_seen(sankei)
 
@@ -2463,6 +2626,7 @@ def fetch_all_sources(collector: BackgroundCollector) -> Dict[str, object]:
                 nsj, wsj_en, wsj_ja, nikkei225jp_items,
                 x_home, x_4accounts, x_real, x_trends,
                 tbs_bloomberg, sbi_fund,
+                yahoo_bbg,
                 yomiuri, sankei]:
         all_full.extend(lst)
     all_full = dedupe(all_full)
@@ -2474,9 +2638,14 @@ def fetch_all_sources(collector: BackgroundCollector) -> Dict[str, object]:
         out = []
         for it in items or []:
             try:
-                src = (it.get("source") or "").lower()
+                src_raw = it.get("source") or ""
+                src = src_raw.lower()
                 url = (it.get("url") or "").lower()
-                if "yahoo" in src or "ヤフー" in (it.get("source") or "") or "yahoo.co.jp" in url or "yahoo.com" in url:
+                # ★ "BBG"（Yahoo!経由Bloomberg）はユーザー指定の許可ソースなので除外しない
+                if src_raw == YAHOO_BBG_SOURCE:
+                    out.append(it)
+                    continue
+                if "yahoo" in src or "ヤフー" in src_raw or "yahoo.co.jp" in url or "yahoo.com" in url:
                     continue
             except Exception:
                 pass
@@ -2495,6 +2664,7 @@ def fetch_all_sources(collector: BackgroundCollector) -> Dict[str, object]:
     wsj_en            = _drop_yahoo(wsj_en)
     wsj_ja            = _drop_yahoo(wsj_ja)
     tbs_bloomberg     = _drop_yahoo(tbs_bloomberg)
+    yahoo_bbg         = _drop_yahoo(yahoo_bbg)
     sbi_fund          = _drop_yahoo(sbi_fund)
     yomiuri           = _drop_yahoo(yomiuri)
     sankei            = _drop_yahoo(sankei)
@@ -2520,6 +2690,7 @@ def fetch_all_sources(collector: BackgroundCollector) -> Dict[str, object]:
         "x_real":          sort_items_by_effective_time_desc(dedupe(x_real)),
         "x_trends":        sort_items_by_effective_time_desc(dedupe(x_trends)),
         "tbs_bloomberg":   sort_items_by_effective_time_desc(dedupe(tbs_bloomberg)),
+        "yahoo_bbg":       sort_items_by_effective_time_desc(dedupe(yahoo_bbg)),
         "sbi_fund":        sort_items_by_effective_time_desc(dedupe(sbi_fund)),
         "yomiuri":         sort_items_by_effective_time_desc(dedupe(yomiuri)),
         "sankei":          sort_items_by_effective_time_desc(dedupe(sankei)),
