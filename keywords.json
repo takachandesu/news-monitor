@@ -1,97 +1,97 @@
 {
-  "updated_at": 1779709214,
-  "updated_at_jst": "2026-05-25 20:40:14 JST",
+  "updated_at": 1780086427,
+  "updated_at_jst": "2026-05-30 05:27:07 JST",
   "handle": "moo_stock",
   "threshold": 200,
   "stats": {
-    "total_tweets_fetched": 175,
-    "removed_replies": 65,
-    "removed_duplicates": 20,
-    "cleaned_tweets_count": 90,
-    "popular_tweets_count": 10,
+    "total_tweets_fetched": 139,
+    "removed_replies": 2,
+    "removed_duplicates": 0,
+    "cleaned_tweets_count": 137,
+    "popular_tweets_count": 44,
     "impression_unavailable_count": 0,
     "analysis_days": 90
   },
   "keywords": [
     {
       "word": "イラン",
+      "count": 29
+    },
+    {
+      "word": "グロース",
+      "count": 23
+    },
+    {
+      "word": "TOP",
+      "count": 20
+    },
+    {
+      "word": "下落",
+      "count": 19
+    },
+    {
+      "word": "上昇",
+      "count": 18
+    },
+    {
+      "word": "データ",
       "count": 13
     },
     {
-      "word": "パキスタン",
-      "count": 5
+      "word": "銘柄",
+      "count": 11
     },
     {
-      "word": "会談",
-      "count": 4
+      "word": "セクション",
+      "count": 11
     },
     {
-      "word": "議長",
-      "count": 3
+      "word": "WEB",
+      "count": 10
     },
     {
-      "word": "陸軍",
-      "count": 3
+      "word": "ispace",
+      "count": 10
     },
     {
-      "word": "参謀",
-      "count": 3
+      "word": "Terra",
+      "count": 10
     },
     {
-      "word": "国会",
-      "count": 2
+      "word": "ジェイドグループ",
+      "count": 9
     },
     {
-      "word": "交渉",
-      "count": 2
+      "word": "米国",
+      "count": 8
     },
     {
-      "word": "権利",
-      "count": 2
+      "word": "市場",
+      "count": 7
     },
     {
-      "word": "言及",
-      "count": 2
+      "word": "合意",
+      "count": 7
     },
     {
-      "word": "テヘラン",
-      "count": 2
+      "word": "Dr",
+      "count": 7
+    },
+    {
+      "word": "lt",
+      "count": 7
+    },
+    {
+      "word": "gt",
+      "count": 7
+    },
+    {
+      "word": "トランプ",
+      "count": 7
     },
     {
       "word": "大統領",
-      "count": 2
-    },
-    {
-      "word": "メディア",
-      "count": 2
-    },
-    {
-      "word": "仲介",
-      "count": 2
-    },
-    {
-      "word": "via",
-      "count": 2
-    },
-    {
-      "word": "FirstSquawk",
-      "count": 2
-    },
-    {
-      "word": "ーー",
-      "count": 2
-    },
-    {
-      "word": "中国",
-      "count": 1
-    },
-    {
-      "word": "インド",
-      "count": 1
-    },
-    {
-      "word": "協力",
-      "count": 1
+      "count": 7
     }
   ]
 }
