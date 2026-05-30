@@ -1,6 +1,6 @@
 """
 日本株ADR乖離率ランキングを毎朝Xに投稿するスクリプト。
-adr-data.json を取得 → ベスト4・ワースト4を1ツイートで投稿。
+adr-data.json を取得 → ベスト3・ワースト3を1ツイートで投稿。
 """
 from __future__ import annotations
 
@@ -14,6 +14,7 @@ import tweepy
 
 JST = timezone(timedelta(hours=9))
 JSON_URL = "https://moo-stock-blog.com/adr-data.json"
+ADR_PAGE_URL = "https://moo-stock-blog.com/%e6%97%a5%e6%9c%ac%e6%a0%aaadr/"
 
 # 長い銘柄名の短縮表記
 NAME_SHORT = {
@@ -91,15 +92,15 @@ def short_name(name, max_len=10):
 
 
 def format_line(item):
-    """1行整形: '三井金属鉱業 +20.50%'"""
+    """1行整形: '三井金属鉱業 +20.5%'（小数点第1位）"""
     name = short_name(item.get("name_jp", ""))
     pct = item.get("divergence_pct", 0.0)
     sign = "+" if pct >= 0 else ""
-    return f"{name} {sign}{pct:.2f}%"
+    return f"{name} {sign}{pct:.1f}%"
 
 
 def build_tweet(data):
-    """ツイート本文を組み立てる（X 280文字以内、ベスト4/ワースト4）"""
+    """ツイート本文を組み立てる（X 280文字以内、ベスト3・ワースト3 + URL）"""
     now = datetime.now(JST)
     date_str = f"{now.month}/{now.day}"
 
@@ -107,16 +108,16 @@ def build_tweet(data):
 
     lines.append("")
     lines.append("上がってる:")
-    for item in data["best"][:4]:
+    for item in data["best"][:3]:
         lines.append(format_line(item))
 
     lines.append("")
     lines.append("下がってる:")
-    for item in data["worst"][:4]:
+    for item in data["worst"][:3]:
         lines.append(format_line(item))
 
     lines.append("")
-    lines.append("詳しくはプロフィールのリンク🔗")
+    lines.append(ADR_PAGE_URL)
 
     return "\n".join(lines)
 
