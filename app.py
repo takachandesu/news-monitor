@@ -1734,9 +1734,12 @@ def fetch_x_real_tweets() -> List[Dict]:
     # source は2アカウント両方「速報」に統一（Xアカウント名は出さない）
     # FirstSquawk: filter="none" → 全ツイート通過（英語のままだと読めないので、後で翻訳される）
     # Yuto_Headline: filter="asterisk" → 「*」または「＊」で始まるツイートのみ通過（日本語なので翻訳不要）
+    # ★ ReutersJapanBiz: ロイター日本（経済・ビジネス）公式。日本語なので翻訳不要。
+    #    赤(速報)ではなく緑(is_green)で表示し、"🔴速報"プレフィックスも付けない。
     account_configs = [
-        {"handle": "FirstSquawk",    "filter": "none",     "source": "速報", "translate": True},
-        {"handle": "Yuto_Headline",  "filter": "asterisk", "source": "速報", "translate": False},
+        {"handle": "FirstSquawk",     "filter": "none",     "source": "速報", "translate": True,  "style": "breaking"},
+        {"handle": "Yuto_Headline",   "filter": "asterisk", "source": "速報", "translate": False, "style": "breaking"},
+        {"handle": "ReutersJapanBiz", "filter": "none",     "source": "ロイター(ビジネス)", "translate": False, "style": "green"},
     ]
 
     items: List[Dict] = []
@@ -1795,10 +1798,14 @@ def fetch_x_real_tweets() -> List[Dict]:
             else:
                 display_title = raw_title
 
-            # ★ タイトルにHTMLタグは入れない（描画側で is_breaking を見て赤くする）
-            #    プレーンテキストの「🔴速報 」プレフィックスだけ付けておくと、
+            # ★ タイトルにHTMLタグは入れない（描画側で is_breaking / is_green を見て着色する）
+            #    速報系はプレーンテキストの「🔴速報 」プレフィックスを付けておくと、
             #    万一描画側のフラグ判定が外れても見た目で速報と分かる。
-            title = "🔴速報 " + display_title
+            #    緑系（ロイター ビジネス等）はプレフィックスを付けない。
+            if acc.get("style") == "green":
+                title = display_title
+            else:
+                title = "🔴速報 " + display_title
 
             # ツイートURL
             tweet_url = t.get("url") or ""
@@ -1813,12 +1820,14 @@ def fetch_x_real_tweets() -> List[Dict]:
             # 投稿時刻（あれば文字列のまま入れる。描画側は first_seen を使う）
             published = t.get("createdAt") or None
 
+            _is_breaking = (acc.get("style") != "green")
             items.append({
                 "source": acc["source"],
                 "title": title,
                 "url": tweet_url,
                 "published": published,
-                "is_breaking": True,  # ← 描画側でこれを見て赤色スタイルを当てる
+                "is_breaking": _is_breaking,  # ← 描画側でこれを見て赤色スタイルを当てる
+                "is_green": (acc.get("style") == "green"),  # ← ロイター(ビジネス)など緑表示
             })
             passed_count += 1
 
@@ -2232,6 +2241,7 @@ def render_items(items: List[Dict], limit: int, show_source: bool, show_time: bo
     <style>
     .news-title.is-breaking { color: #d32f2f; font-weight: bold; }
     .news-title.is-bbg { color: #1976d2; font-weight: 600; }
+    .news-title.is-green { color: #16a34a; font-weight: 600; }
     </style>
     """
     shown = 0
@@ -2243,6 +2253,7 @@ def render_items(items: List[Dict], limit: int, show_source: bool, show_time: bo
         url = (it.get("url") or "").strip()
         src = (it.get("source") or "").strip()
         is_breaking = bool(it.get("is_breaking"))
+        is_green = bool(it.get("is_green"))
 
         dt = it.get("published")
         if not isinstance(dt, datetime):
@@ -2259,6 +2270,8 @@ def render_items(items: List[Dict], limit: int, show_source: bool, show_time: bo
         title_html = _html_escape_local(title)
         if src == "BBG":
             title_class = "news-title is-bbg"
+        elif is_green:
+            title_class = "news-title is-green"
         elif is_breaking:
             title_class = "news-title is-breaking"
         else:
@@ -2292,6 +2305,7 @@ def render_items(items: List[Dict], limit: int, show_source: bool, show_time: bo
             url   = (it.get("url")   or "").strip()
             src   = (it.get("source") or "").strip()
             is_breaking = bool(it.get("is_breaking"))
+            is_green = bool(it.get("is_green"))
             dt    = it.get("published")
             if not isinstance(dt, datetime):
                 dt = it.get("first_seen")
@@ -2307,6 +2321,7 @@ def render_items(items: List[Dict], limit: int, show_source: bool, show_time: bo
                 "key": key, "title": title, "url": url, "meta": meta,
                 "is_breaking": is_breaking,
                 "is_bbg": (src == "BBG"),
+                "is_green": is_green,
             })
             shown += 1
 
@@ -2393,6 +2408,11 @@ def render_items(items: List[Dict], limit: int, show_source: bool, show_time: bo
             color: #1976d2;
             font-weight: 600;
         }}
+        /* ★ ロイター(ビジネス)など：緑字 */
+        .ntitle.is-green {{
+            color: #16a34a;
+            font-weight: 600;
+        }}
         .nrow.is-new {{
             animation: flowDown 5s ease-out forwards;
             transform-origin: top;
@@ -2471,9 +2491,10 @@ def render_items(items: List[Dict], limit: int, show_source: bool, show_time: bo
             function makeRow(it, isNew) {{
                 const row = document.createElement('div');
                 row.className = 'nrow' + (isNew ? ' is-new' : '');
-                // ★ is_bbg → 青字 / is_breaking → 赤太字
+                // ★ is_bbg → 青字 / is_green → 緑字 / is_breaking → 赤太字
                 const titleClass = it.is_bbg ? 'ntitle is-bbg'
-                                 : (it.is_breaking ? 'ntitle is-breaking' : 'ntitle');
+                                 : (it.is_green ? 'ntitle is-green'
+                                 : (it.is_breaking ? 'ntitle is-breaking' : 'ntitle'));
                 row.innerHTML =
                     '<div class="nbtn"><a href="' + esc(it.url) + '" target="_blank" rel="noopener noreferrer">Open</a></div>' +
                     '<div class="' + titleClass + '">' + esc(it.title) +
