@@ -216,6 +216,18 @@ def is_probably_title(s: str) -> bool:
     return True
 
 
+def is_reuters_source(s: str) -> bool:
+    """
+    ソース名がロイター系かどうか。
+    実ツイート（"ロイター" / "ロイター(ビジネス)"）も、RSS/Google News 由来
+    （"@ReutersJapan / ..." / "@Reuters / ..." / "Reuters EN / ..." / "Reuters JP ..."）も
+    すべて緑字で表示するための判定。
+    """
+    if not s:
+        return False
+    return ("reuters" in s.lower()) or ("ロイター" in s)
+
+
 def filter_nsj_star_only(items: List[Dict]) -> List[Dict]:
     """
     日本証券新聞：タイトル先頭が「☆」のものだけ残す
@@ -1736,10 +1748,14 @@ def fetch_x_real_tweets() -> List[Dict]:
     # Yuto_Headline: filter="asterisk" → 「*」または「＊」で始まるツイートのみ通過（日本語なので翻訳不要）
     # ★ ReutersJapanBiz: ロイター日本（経済・ビジネス）公式。日本語なので翻訳不要。
     #    赤(速報)ではなく緑(is_green)で表示し、"🔴速報"プレフィックスも付けない。
+    #    どちらのロイターも 1時間（直近60分窓）最大10件に揃える。
     account_configs = [
         {"handle": "FirstSquawk",     "filter": "none",     "source": "速報", "translate": True,  "style": "breaking"},
         {"handle": "Yuto_Headline",   "filter": "asterisk", "source": "速報", "translate": False, "style": "breaking"},
-        {"handle": "ReutersJapanBiz", "filter": "none",     "source": "ロイター(ビジネス)", "translate": False, "style": "green"},
+        {"handle": "ReutersJapanBiz", "filter": "none",     "source": "ロイター(ビジネス)", "translate": False, "style": "green", "max_items": 10},
+        # ★ @ReutersJapan は総合アカウントで投稿量が多いため、金融・経済キーワードで絞り、
+        #   さらに max_items 件で頭打ちにする。色は ロイター系で揃えて緑。
+        {"handle": "ReutersJapan",    "filter": "jp_keywords", "source": "ロイター", "translate": False, "style": "green", "max_items": 10},
     ]
 
     items: List[Dict] = []
@@ -1756,6 +1772,11 @@ def fetch_x_real_tweets() -> List[Dict]:
         passed_count = 0
 
         for t in tweets:
+            # ★ 件数上限（max_items）に達したら以降は打ち切る。
+            #   advanced_search は新着順なので、新しい方から max_items 件だけ残る。
+            if acc.get("max_items") and passed_count >= acc["max_items"]:
+                break
+
             text = t.get("text") or ""
             if not text:
                 continue
@@ -1779,6 +1800,17 @@ def fetch_x_real_tweets() -> List[Dict]:
                 hit = False
                 text_lower = text.lower()
                 for kw in X_REAL_KEYWORDS_EN:
+                    if kw.lower() in text_lower:
+                        hit = True
+                        break
+                if not hit:
+                    continue
+            elif acc["filter"] == "jp_keywords":
+                # ★ 日本語の金融・経済キーワードを含むツイートだけ通す。
+                #   総合アカウント（@ReutersJapan等）の量が多すぎる対策。
+                hit = False
+                text_lower = text.lower()
+                for kw in X_REUTERS_JP_KEYWORDS:
                     if kw.lower() in text_lower:
                         hit = True
                         break
@@ -1903,6 +1935,18 @@ TWITTER_TREND_CATEGORIES: Dict[str, List[str]] = {
         "ecb", "ラガルド", "lagarde", "imf",
     ],
 }
+
+
+# ★ @ReutersJapan（総合アカウント）の絞り込み用キーワード。
+#   既存の TWITTER_TREND_CATEGORIES を単一の出典として再利用し、
+#   金融・経済・政治に関係する5カテゴリ（米株/日本株/為替/経済/政治）を平坦化して使う。
+#   政治には海外要人（トランプ/プーチン/習近平等）も含むため、世界の政治も拾える。
+_REUTERS_JP_CATEGORIES = ("米株", "日本株", "為替", "経済", "政治")
+X_REUTERS_JP_KEYWORDS: List[str] = [
+    kw
+    for _cat in _REUTERS_JP_CATEGORIES
+    for kw in TWITTER_TREND_CATEGORIES.get(_cat, [])
+]
 
 
 def fetch_twitter_trends_categorized() -> List[Dict]:
@@ -2253,7 +2297,7 @@ def render_items(items: List[Dict], limit: int, show_source: bool, show_time: bo
         url = (it.get("url") or "").strip()
         src = (it.get("source") or "").strip()
         is_breaking = bool(it.get("is_breaking"))
-        is_green = bool(it.get("is_green"))
+        is_green = bool(it.get("is_green")) or is_reuters_source(src)
 
         dt = it.get("published")
         if not isinstance(dt, datetime):
@@ -2305,7 +2349,7 @@ def render_items(items: List[Dict], limit: int, show_source: bool, show_time: bo
             url   = (it.get("url")   or "").strip()
             src   = (it.get("source") or "").strip()
             is_breaking = bool(it.get("is_breaking"))
-            is_green = bool(it.get("is_green"))
+            is_green = bool(it.get("is_green")) or is_reuters_source(src)
             dt    = it.get("published")
             if not isinstance(dt, datetime):
                 dt = it.get("first_seen")
