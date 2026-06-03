@@ -228,6 +228,19 @@ def is_reuters_source(s: str) -> bool:
     return ("reuters" in s.lower()) or ("ロイター" in s)
 
 
+def is_bloomberg_source(s: str) -> bool:
+    """
+    ソース名が Bloomberg 系かどうか。
+    "BBG"（Yahoo!経由）、nikkei225jp 由来の "Bloomberg"、Google News 由来の
+    "Bloomberg EN / ..." / "Bloomberg JP (...)" / "@BloombergJapan / ..." / "@business / ..." 、
+    "TBS NEWS DIG / Bloomberg" などをすべて青字で表示するための判定。
+    """
+    if not s:
+        return False
+    sl = s.lower()
+    return ("bloomberg" in sl) or ("ブルームバーグ" in s) or (s.strip() == "BBG") or ("@business" in sl)
+
+
 def filter_nsj_star_only(items: List[Dict]) -> List[Dict]:
     """
     日本証券新聞：タイトル先頭が「☆」のものだけ残す
@@ -2312,7 +2325,7 @@ def render_items(items: List[Dict], limit: int, show_source: bool, show_time: bo
 
         # ★ タイトルはエスケープ（HTMLタグが含まれていてもプレーンに表示）
         title_html = _html_escape_local(title)
-        if src == "BBG":
+        if is_bloomberg_source(src):
             title_class = "news-title is-bbg"
         elif is_green:
             title_class = "news-title is-green"
@@ -2364,7 +2377,7 @@ def render_items(items: List[Dict], limit: int, show_source: bool, show_time: bo
             items_data.append({
                 "key": key, "title": title, "url": url, "meta": meta,
                 "is_breaking": is_breaking,
-                "is_bbg": (src == "BBG"),
+                "is_bbg": is_bloomberg_source(src),
                 "is_green": is_green,
             })
             shown += 1
