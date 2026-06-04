@@ -3577,28 +3577,35 @@ def _calc_prev_close_pct(yahoo_ticker: str, cash_ref_ticker: Optional[str] = Non
 def _tv_widget_block(symbol: str, kind: str = "mini", color_theme: str = "light") -> str:
     """
     kind = "mini"     : embed-widget-mini-symbol-overview.js（コンパクト・チャート＋%）
-    kind = "overview" : embed-widget-symbol-overview.js     （% 表示が確実だが少し大きめ）
+    kind = "overview" : embed-widget-advanced-chart.js      （日中足を確実に描画・期間切替対応）
     color_theme       : "light" or "dark"
     """
     if kind == "overview":
+        # ★ 変更: symbol-overview → advanced-chart
+        #   symbol-overview ウィジェットは「日足ベースの折れ線専用」で、
+        #   「1日(1D)」タブの日中(intraday)データが空/疎になりやすい。
+        #   （1M/3M/12M は日足なので描けるが、1D だけ出ない＝今回の症状）
+        #   advanced-chart は日中足を確実に描画でき、期間切替(1日/1ヶ月/3ヶ月…)も機能する。
         cfg = {
-            "symbols": [[symbol + "|12M"]],  # 12ヶ月表示（祝日でも過去1年の値動きが見える）
-            "chartOnly": True,
+            "symbol": symbol,
             "width": "100%",
             "height": "220",
             "locale": "ja",
-            "colorTheme": color_theme,
-            "isTransparent": True,
+            "timezone": "Asia/Tokyo",
+            "theme": color_theme,            # advanced-chart は "colorTheme" でなく "theme"
+            "style": "3",                    # 3 = エリア(塗りつぶし折れ線)。旧UIに近い見た目
+            "range": "1D",                   # ★ デフォルト表示を「1日」に
+            "withdateranges": True,          # 期間切替ボタン(1日/5日/1ヶ月/3ヶ月…)を表示
+            "backgroundColor": "rgba(0,0,0,0)",  # 透過
+            "hide_top_toolbar": True,        # 上部ツールバー非表示（スッキリ）
+            "hide_legend": True,             # 銘柄レジェンド非表示
+            "hide_side_toolbar": True,       # 左の描画ツール非表示
+            "allow_symbol_change": False,    # 銘柄変更不可（埋め込み固定）
+            "save_image": False,
+            "calendar": False,
             "autosize": False,
-            "showVolume": False,
-            "showMA": False,
-            "hideDateRanges": False,         # 期間切替ボタンを表示（1D/1M/3M/12M)
-            "hideMarketStatus": True,
-            "hideSymbolLogo": True,
-            "scalePosition": "right",
-            "scaleMode": "Normal",
         }
-        src = "https://s3.tradingview.com/external-embedding/embed-widget-symbol-overview.js"
+        src = "https://s3.tradingview.com/external-embedding/embed-widget-advanced-chart.js"
     else:
         cfg = {
             "symbol": symbol,
