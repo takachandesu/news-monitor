@@ -3594,8 +3594,9 @@ def _tv_widget_block(symbol: str, kind: str = "mini", color_theme: str = "light"
             "timezone": "Asia/Tokyo",
             "theme": color_theme,            # advanced-chart は "colorTheme" でなく "theme"
             "style": "3",                    # 3 = エリア(塗りつぶし折れ線)。旧UIに近い見た目
-            "range": "1D",                   # ★ デフォルト表示を「1日」に
-            "withdateranges": True,          # 期間切替ボタン(1日/5日/1ヶ月/3ヶ月…)を表示
+            "interval": "5",                 # ★ 足の刻み = 5分足
+            "range": "5D",                   # ★ デフォルト表示を「5日」に
+            "withdateranges": True,          # 期間切替ボタン(1日/5日/1ヶ月/3ヶ月…)はそのまま表示
             "backgroundColor": "rgba(0,0,0,0)",  # 透過
             "hide_top_toolbar": True,        # 上部ツールバー非表示（スッキリ）
             "hide_legend": True,             # 銘柄レジェンド非表示
