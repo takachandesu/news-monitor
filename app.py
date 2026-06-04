@@ -241,6 +241,20 @@ def is_bloomberg_source(s: str) -> bool:
     return ("bloomberg" in sl) or ("ブルームバーグ" in s) or (s.strip() == "BBG") or ("@business" in sl)
 
 
+def is_tweet_url(u: str) -> bool:
+    """
+    実ツイートの permalink か（x.com/{handle}/status/{id} 形式）。
+    実ツイート（速報・ロイター実ツイート等）のみ True を返し、「Open」を出さない。
+    ※ トレンド検索（x.com/search?...）は /status/ を含まないので False＝Openは残す。
+    ※ RSS/Google News 由来（bloomberg.co.jp / jp.reuters.com 等）も記事URLなので False。
+    """
+    if not u:
+        return False
+    ul = u.lower()
+    is_x = ("//x.com/" in ul) or ("//www.x.com/" in ul) or ("//mobile.x.com/" in ul) or ("twitter.com/" in ul)
+    return is_x and ("/status/" in ul)
+
+
 def filter_nsj_star_only(items: List[Dict]) -> List[Dict]:
     """
     日本証券新聞：タイトル先頭が「☆」のものだけ残す
@@ -2334,9 +2348,16 @@ def render_items(items: List[Dict], limit: int, show_source: bool, show_time: bo
         else:
             title_class = "news-title"
 
+        # ★ 実ツイート（x.com/.../status/...）のときだけ「Open」を出さない。
+        #   トレンド検索（x.com/search）は Open を残す。
+        if url and not is_tweet_url(url):
+            open_html = f'<div class="news-open"><a href="{url}" target="_blank" rel="noopener noreferrer">Open</a></div>'
+        else:
+            open_html = ""
+
         rows_html += f"""
         <div class="news-row" style="border-bottom:1px solid rgba(128,128,128,0.15); padding:4px 0;">
-          <div class="news-open"><a href="{url}" target="_blank" rel="noopener noreferrer">Open</a></div>
+          {open_html}
           <div class="{title_class}">
             {title_html}
             {"<span class='news-meta'>(" + _html_escape_local(meta) + ")</span>" if meta else ""}
@@ -2379,6 +2400,7 @@ def render_items(items: List[Dict], limit: int, show_source: bool, show_time: bo
                 "is_breaking": is_breaking,
                 "is_bbg": is_bloomberg_source(src),
                 "is_green": is_green,
+                "is_tweet": is_tweet_url(url),
             })
             shown += 1
 
@@ -2552,8 +2574,12 @@ def render_items(items: List[Dict], limit: int, show_source: bool, show_time: bo
                 const titleClass = it.is_bbg ? 'ntitle is-bbg'
                                  : (it.is_green ? 'ntitle is-green'
                                  : (it.is_breaking ? 'ntitle is-breaking' : 'ntitle'));
+                // ★ ソースがツイッター（x.com / twitter.com）の場合は「Open」を出さない
+                const openHtml = (it.url && !it.is_tweet)
+                    ? '<div class="nbtn"><a href="' + esc(it.url) + '" target="_blank" rel="noopener noreferrer">Open</a></div>'
+                    : '';
                 row.innerHTML =
-                    '<div class="nbtn"><a href="' + esc(it.url) + '" target="_blank" rel="noopener noreferrer">Open</a></div>' +
+                    openHtml +
                     '<div class="' + titleClass + '">' + esc(it.title) +
                     (it.meta ? '<span class="nmeta"> (' + esc(it.meta) + ')</span>' : '') +
                     '</div>';
