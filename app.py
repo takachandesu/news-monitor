@@ -2008,6 +2008,11 @@ def fetch_twitter_trends_categorized() -> List[Dict]:
         try:
             r = requests.get(url, headers=headers, timeout=15)
             r.raise_for_status()
+            # ★ 文字化け対策: Content-Type に charset 指定が無いと requests は
+            #   ISO-8859-1(Latin-1)で復号し、日本語トレンドが「ã¹ã¼ãã¼」のように化ける。
+            #   trends24.in / getdaytrends.com は UTF-8 なので明示的に上書きする。
+            if (not r.encoding) or r.encoding.lower() in ("iso-8859-1", "latin-1"):
+                r.encoding = r.apparent_encoding or "utf-8"
             from bs4 import BeautifulSoup
             soup = BeautifulSoup(r.text, "html.parser")
 
