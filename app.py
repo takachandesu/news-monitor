@@ -1976,6 +1976,31 @@ X_REUTERS_JP_KEYWORDS: List[str] = [
 ]
 
 
+def _repair_mojibake(s: str) -> str:
+    """
+    UTF-8 を cp1252/latin-1 で誤デコードした文字列（mojibake）を復元する保険処理。
+    ・すでに日本語を含む → 正常とみなしそのまま返す
+    ・mojibake 特有の文字が無い（英数字・ハッシュタグ等）→ そのまま返す（壊さない）
+    ・上記以外で、cp1252/latin-1 経由で再エンコード→UTF-8デコードすると日本語になる場合のみ復元
+    どの試行も日本語にならなければ元の文字列を返す（誤った変換で壊さない）。
+    """
+    if not s:
+        return s
+    jp = r"[ぁ-んァ-ヶー一-龯]"
+    if re.search(jp, s):
+        return s
+    if not re.search(r"[ÃÂâãÉÈÊËÎÏÔÛŠšŸ„‚™¿½¶©®¥§]", s):
+        return s
+    for enc in ("cp1252", "latin-1"):
+        try:
+            repaired = s.encode(enc, errors="strict").decode("utf-8", errors="strict")
+        except (UnicodeEncodeError, UnicodeDecodeError):
+            continue
+        if re.search(jp, repaired):
+            return repaired
+    return s
+
+
 def fetch_twitter_trends_categorized() -> List[Dict]:
     """
     日本の Twitter トレンドキーワードを公開サイトから取得し、
@@ -2009,10 +2034,12 @@ def fetch_twitter_trends_categorized() -> List[Dict]:
             r = requests.get(url, headers=headers, timeout=15)
             r.raise_for_status()
             from bs4 import BeautifulSoup
-            # ★ 文字化け対策: requests は charset 未指定のページを latin-1 でデコードするため、
-            #   r.text を使うと UTF-8 の日本語トレンドが化ける（ASCIIは無事）。
-            #   バイト列 r.content を渡し、ページの meta charset / 自動判定でデコードさせる。
-            soup = BeautifulSoup(r.content, "html.parser")
+            # ★ 文字化け対策（強化版）:
+            #   trends24.in / getdaytrends.com はどちらも UTF-8。
+            #   requests は charset 未指定のページを latin-1 等で誤デコードするため、
+            #   ここで明示的に UTF-8 を指定してから読む（自動判定に頼らず確実にUTF-8）。
+            r.encoding = "utf-8"
+            soup = BeautifulSoup(r.text, "html.parser")
 
             # trends24.in: <ol class="trend-card__list"><li><a>WORD</a></li>
             # getdaytrends: <table class="ranking">...<a>WORD</a>
@@ -2028,6 +2055,7 @@ def fetch_twitter_trends_categorized() -> List[Dict]:
                 for el in soup.select(sel):
                     text = el.get_text(strip=True)
                     text = re.sub(r"\s+", " ", text).strip()
+                    text = _repair_mojibake(text)   # ★ 念のための文字化け修復（保険）
                     # 不要要素フィルタ
                     if not text or len(text) < 2 or len(text) > 80:
                         continue
