@@ -20,7 +20,6 @@ jobs:
         with:
           python-version: '3.11'
           cache: pip
-
       # ────────────────────────────────────
       # ① sekai-kabuka URL の自動更新 (Playwright)
       # ────────────────────────────────────
@@ -29,28 +28,19 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.cache/ms-playwright
-          key: playwright-chromium-${{ runner.os }}-v1
-
+          key: playwright-chromium-${{ runner.os }}-${{ hashFiles('**/requirements.txt') }}-v2
       - name: Install Playwright
         run: |
           pip install --quiet playwright
-          # キャッシュにブラウザが入っているか軽くチェック
-          if ls "$HOME/.cache/ms-playwright/" 2>/dev/null | grep -q chromium; then
-            playwright install-deps chromium || true
-          else
-            playwright install --with-deps chromium
-          fi
-
+          playwright install --with-deps chromium
       - name: Refresh sekai-kabuka URL
         run: python refresh_sekai_url.py || echo "[warn] sekai URL refresh failed (continuing)"
         continue-on-error: true
-
       # ────────────────────────────────────
       # ② X 投稿スクリプト本体
       # ────────────────────────────────────
       - name: Install posting dependencies
         run: pip install --quiet requests tweepy anthropic
-
       - name: Run posting script
         env:
           TWITTERAPI_IO_KEY: ${{ secrets.TWITTERAPI_IO_KEY }}
@@ -60,7 +50,6 @@ jobs:
           X_ACCESS_TOKEN:    ${{ secrets.X_ACCESS_TOKEN }}
           X_ACCESS_SECRET:   ${{ secrets.X_ACCESS_SECRET }}
         run: python post_to_x.py
-
       # ────────────────────────────────────
       # ③ 変更があれば commit & push
       # ────────────────────────────────────
