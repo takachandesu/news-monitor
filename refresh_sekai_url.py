@@ -85,6 +85,7 @@ def verify_is_data_url(url: str):
         return False, 0, f"FETCH_ERROR: {type(e).__name__}: {str(e)[:50]}"
 
 
+
 def parse_indices_from_body_text(body_text: str):
     """
     ページ全体のinnerText (body_text) から、各銘柄の現在値を抽出する。
