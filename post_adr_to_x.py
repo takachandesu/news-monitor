@@ -83,6 +83,7 @@ def fetch_data():
 
 
 MAX_DATA_AGE_HOURS = 30  # adr-data.json がこれより古ければ投稿しない
+MAX_ABS_DIVERGENCE = 30.0  # 乖離率の絶対値がこれ(%)を超える銘柄は異常値として載せない
 
 
 def data_age_hours(updated_at):
@@ -231,6 +232,25 @@ def main():
               file=sys.stderr, flush=True)
         return 1
     print(f"[info] データ鮮度OK: {age_h:.1f}時間前", flush=True)
+
+    # ★ 異常値の除外 (2026/10/11 追加)
+    #   株式分割などで ADR の換算比率がずれると「大和ハウス -50.3%」のような
+    #   あり得ない乖離率が出る。±MAX_ABS_DIVERGENCE% を超える銘柄はツイートに載せない。
+    for side in ("best", "worst"):
+        kept, dropped = [], []
+        for item in data.get(side, []):
+            try:
+                pct = float(item.get("divergence_pct", 0.0))
+            except (TypeError, ValueError):
+                dropped.append(item)
+                continue
+            (dropped if abs(pct) > MAX_ABS_DIVERGENCE else kept).append(item)
+        for item in dropped:
+            print(f"[warn] 異常値のため除外: {item.get('name_jp')} {item.get('divergence_pct')}%", flush=True)
+        data[side] = kept
+    if len(data.get("best", [])) < 3 or len(data.get("worst", [])) < 3:
+        print("[error] 異常値を除いた結果、銘柄が足りないので投稿しません", file=sys.stderr, flush=True)
+        return 1
 
     tweet_text, used_n = build_tweet_fit(data)
     print(f"[info] tweet best/worst {used_n}件 / weighted {tweet_weighted_len(tweet_text)} / {len(tweet_text)} python-chars", flush=True)
