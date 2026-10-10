@@ -82,6 +82,29 @@ def fetch_data():
     return r.json()
 
 
+MAX_DATA_AGE_HOURS = 30  # adr-data.json がこれより古ければ投稿しない
+
+
+def data_age_hours(updated_at):
+    """'2026-07-28 06:35:45 JST' 形式の updated_at が何時間前かを返す。読めなければ None"""
+    if not updated_at:
+        return None
+    s = str(updated_at).replace("JST", "").strip()
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%dT%H:%M:%S"):
+        try:
+            ts = datetime.strptime(s[:19], fmt).replace(tzinfo=JST)
+            return (datetime.now(JST) - ts).total_seconds() / 3600
+        except ValueError:
+            continue
+    try:
+        ts = datetime.fromisoformat(s)
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=JST)
+        return (datetime.now(JST) - ts).total_seconds() / 3600
+    except ValueError:
+        return None
+
+
 def short_name(name, max_len=10):
     """銘柄名を短く整形"""
     if name in NAME_SHORT:
@@ -191,6 +214,23 @@ def main():
     if not data.get("best") or not data.get("worst"):
         print("[error] best/worst data missing", file=sys.stderr, flush=True)
         return 1
+
+    # ★ 鮮度チェック (2026/10/11 追加)
+    #   2026/7/28 に moo-adr-tracker のデータ更新が GitHub に自動停止され、
+    #   以後 2か月以上「7/28 の同じ数字」に今日の日付を付けて投稿し続けていた。
+    #   データが古い時は投稿しない(赤✕で失敗させて気づけるようにする)。
+    age_h = data_age_hours(data.get("updated_at"))
+    if age_h is None:
+        print(f"[error] updated_at を読めないので投稿しません: {data.get('updated_at')!r}",
+              file=sys.stderr, flush=True)
+        return 1
+    if age_h > MAX_DATA_AGE_HOURS:
+        print(f"[error] データが古いので投稿しません: updated_at={data.get('updated_at')} "
+              f"({age_h:.0f}時間前 / 上限{MAX_DATA_AGE_HOURS}時間)。"
+              f"moo-adr-tracker の「Update ADR Data」が止まっていないか確認してください。",
+              file=sys.stderr, flush=True)
+        return 1
+    print(f"[info] データ鮮度OK: {age_h:.1f}時間前", flush=True)
 
     tweet_text, used_n = build_tweet_fit(data)
     print(f"[info] tweet best/worst {used_n}件 / weighted {tweet_weighted_len(tweet_text)} / {len(tweet_text)} python-chars", flush=True)
