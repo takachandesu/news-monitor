@@ -25,6 +25,7 @@ import json
 import gzip
 from datetime import datetime, timezone
 
+import urllib.parse
 import urllib.request
 from playwright.async_api import async_playwright
 
@@ -204,7 +205,7 @@ def parse_indices_from_body_text(body_text: str):
 
 
 def _is_plausible(key: str, val: float) -> bool:
-    """各銘柄の典型レンジに収まっているか"""
+    """各銘柄の典型レンジに収まっているか + (取れていれば) 基準値 (Yahoo の直近値) に近いか"""
     ranges = {
         "dow":    (10000, 100000),
         "nas100": (8000,  50000),
@@ -213,9 +214,86 @@ def _is_plausible(key: str, val: float) -> bool:
         "vix":    (5,     100),
     }
     lo, hi = ranges.get(key, (None, None))
-    if lo is None:
-        return True
-    return lo <= val <= hi
+    if lo is not None and not (lo <= val <= hi):
+        return False
+    return _near_reference(key, val)
+
+
+# =====================================================
+# ★ 基準値チェック (2026/10/11 追加)
+#   2026/9/5 に sekai-kabuka のレイアウトが変わってから、「原油」のラベル近くで
+#   銀(シルバー, 60ドル台)の値を拾っていた (原油は90ドル前後)。
+#   銀も原油レンジ (10〜250) に入るため、レンジチェックだけでは防げない。
+#   → Yahoo Finance の直近値 (土日なら金曜終値) を基準にして、
+#     ・基準から ±許容率 を超える値
+#     ・自分の基準より「紛らわしい銘柄」(原油なら銀) の基準に近い値
+#     は採用しない。基準値が取れない時は従来どおりレンジチェックのみ。
+# =====================================================
+REFERENCE_SYMBOLS = {
+    "dow":    "^DJI",
+    "nas100": "^NDX",
+    "oil":    "CL=F",
+    "gold":   "GC=F",
+    "vix":    "^VIX",
+    "silver": "SI=F",   # 原油と取り違えないための比較用 (保存はしない)
+}
+REFERENCE_TOLERANCE = {
+    "dow":    0.08,
+    "nas100": 0.10,
+    "oil":    0.20,
+    "gold":   0.12,
+    "vix":    0.60,
+}
+CONFUSABLE = {
+    "oil": ["silver"],
+}
+REFERENCES = {}   # main() で埋める {"oil": 91.85, ...}
+
+
+def fetch_reference_prices():
+    """Yahoo Finance の chart API から各銘柄の直近値 (土日は金曜終値) を取る。失敗した銘柄は入れない"""
+    refs = {}
+    for key, sym in REFERENCE_SYMBOLS.items():
+        for host in ("query1", "query2"):
+            url = (f"https://{host}.finance.yahoo.com/v8/finance/chart/"
+                   f"{urllib.parse.quote(sym)}?range=5d&interval=1d")
+            try:
+                req = urllib.request.Request(url, headers={
+                    "User-Agent": (
+                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                        "AppleWebKit/537.36 (KHTML, like Gecko) "
+                        "Chrome/122.0.0.0 Safari/537.36"
+                    ),
+                    "Accept": "application/json",
+                })
+                with urllib.request.urlopen(req, timeout=DATA_FETCH_TIMEOUT_SEC) as r:
+                    obj = json.loads(r.read().decode("utf-8", errors="ignore"))
+                meta = obj["chart"]["result"][0]["meta"]
+                price = meta.get("regularMarketPrice") or meta.get("chartPreviousClose")
+                if price and float(price) > 0:
+                    refs[key] = float(price)
+                    break
+            except Exception as e:
+                print(f"[warn] reference {sym} via {host} failed: {type(e).__name__}", file=sys.stderr)
+    return refs
+
+
+def _near_reference(key: str, val: float) -> bool:
+    ref = REFERENCES.get(key)
+    tol = REFERENCE_TOLERANCE.get(key)
+    if not ref or tol is None:
+        return True   # 基準値なし → チェックしない (従来どおり)
+    dist = abs(val - ref) / ref
+    if dist > tol:
+        print(f"[debug] reject {key}={val} (基準 {ref:.2f} から {dist*100:.1f}% 乖離)", file=sys.stderr)
+        return False
+    for other in CONFUSABLE.get(key, []):
+        oref = REFERENCES.get(other)
+        if oref and abs(val - oref) / oref < dist:
+            # 紛らわしい銘柄 (原油に対する銀など) の方が近い
+            print(f"[debug] reject {key}={val} ({other} の基準 {oref:.2f} の方が近い)", file=sys.stderr)
+            return False
+    return True
 
 
 async def collect_data():
@@ -361,6 +439,12 @@ def update_indices_file(body_text):
             for i, t in matching[:5]:  # 最大5件
                 print(f"    [{i}] {t[:80]}", file=sys.stderr)
 
+    # ★ デバッグ: 原油ラベル前後のトークン (レイアウト変更時の調査用)
+    for i, t in enumerate(tokens):
+        if "原油" in t or "WTI" in t:
+            lo, hi = max(0, i - 6), min(len(tokens), i + 7)
+            print(f"[debug] around [{i}] {t[:30]}: {tokens[lo:hi]}", file=sys.stderr)
+
     indices = parse_indices_from_body_text(body_text)
     if not indices:
         print("[warn] No instruments matched in body text", file=sys.stderr)
@@ -409,6 +493,11 @@ def main():
         return 1
 
     print(f"[info] Captured {len(urls)} URLs, body_text={len(body_text)} chars", file=sys.stderr)
+
+    # ★ 基準値 (Yahoo の直近値) を取得 → 別銘柄の値を拾わないためのチェックに使う
+    REFERENCES.clear()
+    REFERENCES.update(fetch_reference_prices())
+    print(f"[info] reference prices: {REFERENCES}", file=sys.stderr)
 
     # ① データURL更新
     url_ok = update_data_url_file(urls)

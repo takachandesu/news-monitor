@@ -241,6 +241,85 @@ def is_bloomberg_source(s: str) -> bool:
     return ("bloomberg" in sl) or ("ブルームバーグ" in s) or (s.strip() == "BBG") or ("@business" in sl)
 
 
+# ============================================================
+# ★ 話題による色分け (2026/10/11 追加)
+#   株式に関わる見出し → 太字の黒 / 為替に関わる見出し → 紫
+#   ・ブルームバーグ(青)・ロイター(緑)・速報(赤) の色が優先。
+#     それ以外の「普通の黒字」の見出しだけに適用する。
+#   ・株と為替の両方に当たる見出し (例: 「円安で輸出株高」) は為替(紫)を優先。
+#   ・キーワードを足したい時は下のリストに追加するだけでOK。
+# ============================================================
+# 為替: そのまま含まれていれば為替とみなす語
+_FX_WORDS_JA = [
+    "為替", "外為", "円相場", "ドル円", "ドル・円", "ドル/円", "ドル／円",
+    "ユーロ円", "ユーロドル", "ユーロ・ドル", "ポンド円", "豪ドル円",
+    "円買い", "円売り", "ドル買い", "ドル売り", "ユーロ買い", "ユーロ売り",
+    "人民元", "通貨安", "通貨高", "レートチェック", "円キャリー",
+    "ドル指数", "ドルインデックス", "覆面介入", "円買い介入",
+]
+# 為替: 「円安」「ドル高」など。ただし「300円高」「162ドル安」のように
+#       数字が前に付くもの (=株価や原油の値幅) は為替ではないので除外する
+_FX_UPDOWN_RE = re.compile(
+    r"(?<![0-9０-９,，.．万千百十億兆])(?:円|ドル|ユーロ|ポンド|ウォン|ルーブル|ルピー|リラ|フラン)(?:高|安)"
+)
+_FX_WORDS_EN_RE = re.compile(
+    r"\byen\b|\bforex\b|\bFX\b|\bcurrenc(?:y|ies)\b|(?<!-)\bdollar\b(?! (?:General|Tree))|\bsterling\b"
+    r"|\bUSD ?/? ?JPY\b|\bEUR ?/? ?USD\b|\bexchange rates?\b",
+    re.IGNORECASE,
+)
+
+# 株式: そのまま含まれていれば株式とみなす語
+_STOCK_WORDS_JA = [
+    "日経平均", "日経225", "日経先物", "TOPIX", "東証", "上場", "IPO",
+    "決算", "増益", "減益", "最高益", "上方修正", "下方修正", "業績予想",
+    "配当", "増配", "減配", "ストップ高", "ストップ安", "年初来高値", "年初来安値",
+    "ナスダック", "NASDAQ", "S&P", "SP500", "SOX指数", "半導体指数",
+    "時価総額", "TOB", "MBO", "空売り", "信用買い", "信用売り", "売買代金",
+    "グロース市場", "プライム市場", "スタンダード市場", "ADR", "銘柄",
+    "大引け", "前引け", "寄り付き",
+]
+# 「ダウ」は「ダウン」「シャットダウン」を、「PTS」は「PTSD」を除外
+_STOCK_DOW_RE = re.compile(r"ダウ(?!ン)|PTS(?!D)")
+# 「株」は株価・株式・米株・自社株など。ただし会社名やウイルスの「株」は除外
+_NON_STOCK_KABU_RE = re.compile(
+    r"株式会社|[（(]株[)）]|㈱|(?:変異|ウイルス|オミクロン|デルタ|菌|切り|古|系統|派生)株"
+    r"|[A-Za-z]{2,}[\d.]*株"
+)
+_STOCK_WORDS_EN_RE = re.compile(
+    r"\bstocks?\b|\bshares\b|\bshare price|\bequit(?:y|ies)\b|\bDow\b|\bNasdaq\b|\bS&P\b"
+    r"|\bIPOs?\b|\bearnings\b|\bWall St(?:reet)?\b(?! Journal)|\bNikkei (?:225|average|index|stock)"
+    r"|\bTopix\b|\bbuybacks?\b|\bdividends?\b|\bmarket cap",
+    re.IGNORECASE,
+)
+
+
+def topic_of(title: str, src: str = "") -> str:
+    """見出しが為替の話題なら "fx"、株式の話題なら "stock"、どちらでもなければ "" を返す。"""
+    t = title or ""
+    s = src or ""
+
+    # X トレンドはカテゴリ (例: "X トレンド／米株", "X トレンド／為替") でも判定
+    is_x_trend = s.startswith("X トレンド")
+
+    # ── 為替 (優先)
+    if (any(w in t for w in _FX_WORDS_JA)
+            or _FX_UPDOWN_RE.search(t)
+            or _FX_WORDS_EN_RE.search(t)
+            or (is_x_trend and "為替" in s)):
+        return "fx"
+
+    # ── 株式
+    t_kabu = _NON_STOCK_KABU_RE.sub("", t)
+    if (any(w in t for w in _STOCK_WORDS_JA)
+            or "株" in t_kabu
+            or _STOCK_DOW_RE.search(t)
+            or _STOCK_WORDS_EN_RE.search(t)
+            or (is_x_trend and ("米株" in s or "日本株" in s))):
+        return "stock"
+
+    return ""
+
+
 def is_tweet_url(u: str) -> bool:
     """
     実ツイートの permalink か（x.com/{handle}/status/{id} 形式）。
@@ -2344,6 +2423,13 @@ def render_items(items: List[Dict], limit: int, show_source: bool, show_time: bo
     .news-title.is-breaking { color: #d32f2f; font-weight: bold; }
     .news-title.is-bbg { color: #1976d2; font-weight: 600; }
     .news-title.is-green { color: #16a34a; font-weight: 600; }
+    /* ★ 株式の話題: 太字の黒 / 為替の話題: 紫 (2026/10/11) */
+    .news-title.is-stock { color: #000000; font-weight: bold; }
+    .news-title.is-fx { color: #7b1fa2; }
+    @media (prefers-color-scheme: dark) {
+      .news-title.is-stock { color: #ffffff; }
+      .news-title.is-fx { color: #ce93d8; }
+    }
     </style>
     """
     shown = 0
@@ -2370,12 +2456,17 @@ def render_items(items: List[Dict], limit: int, show_source: bool, show_time: bo
 
         # ★ タイトルはエスケープ（HTMLタグが含まれていてもプレーンに表示）
         title_html = _html_escape_local(title)
+        topic = topic_of(title, src)
         if is_bloomberg_source(src):
             title_class = "news-title is-bbg"
         elif is_green:
             title_class = "news-title is-green"
         elif is_breaking:
             title_class = "news-title is-breaking"
+        elif topic == "fx":
+            title_class = "news-title is-fx"
+        elif topic == "stock":
+            title_class = "news-title is-stock"
         else:
             title_class = "news-title"
 
@@ -2432,6 +2523,7 @@ def render_items(items: List[Dict], limit: int, show_source: bool, show_time: bo
                 "is_bbg": is_bloomberg_source(src),
                 "is_green": is_green,
                 "is_tweet": is_tweet_url(url),
+                "topic": topic_of(title, src),   # "fx" / "stock" / ""
             })
             shown += 1
 
@@ -2469,6 +2561,8 @@ def render_items(items: List[Dict], limit: int, show_source: bool, show_time: bo
             --btn-bdr:   rgba(255,255,255,0.2);
             --meta-fg:   rgba(255,255,255,0.5);
             --new-hl:    rgba(255,210,0,0.22);
+            --stock-fg:  #ffffff;
+            --fx-fg:     #ce93d8;
         }}
         :root[data-theme="light"] {{
             --bg:        #ffffff;
@@ -2480,6 +2574,8 @@ def render_items(items: List[Dict], limit: int, show_source: bool, show_time: bo
             --btn-bdr:   rgba(49,51,63,0.25);
             --meta-fg:   rgba(0,0,0,0.5);
             --new-hl:    rgba(255,210,0,0.35);
+            --stock-fg:  #000000;
+            --fx-fg:     #7b1fa2;
         }}
         html, body {{
             margin: 0; padding: 0;
@@ -2522,6 +2618,15 @@ def render_items(items: List[Dict], limit: int, show_source: bool, show_time: bo
         .ntitle.is-green {{
             color: #16a34a;
             font-weight: 600;
+        }}
+        /* ★ 株式の話題：太字の黒 (2026/10/11) */
+        .ntitle.is-stock {{
+            color: var(--stock-fg);
+            font-weight: bold;
+        }}
+        /* ★ 為替の話題：紫 (2026/10/11) */
+        .ntitle.is-fx {{
+            color: var(--fx-fg);
         }}
         .nrow.is-new {{
             animation: flowDown 5s ease-out forwards;
@@ -2602,9 +2707,12 @@ def render_items(items: List[Dict], limit: int, show_source: bool, show_time: bo
                 const row = document.createElement('div');
                 row.className = 'nrow' + (isNew ? ' is-new' : '');
                 // ★ is_bbg → 青字 / is_green → 緑字 / is_breaking → 赤太字
+                //   それ以外: 為替の話題 → 紫 / 株式の話題 → 太字の黒
                 const titleClass = it.is_bbg ? 'ntitle is-bbg'
                                  : (it.is_green ? 'ntitle is-green'
-                                 : (it.is_breaking ? 'ntitle is-breaking' : 'ntitle'));
+                                 : (it.is_breaking ? 'ntitle is-breaking'
+                                 : (it.topic === 'fx' ? 'ntitle is-fx'
+                                 : (it.topic === 'stock' ? 'ntitle is-stock' : 'ntitle'))));
                 // ★ ソースがツイッター（x.com / twitter.com）の場合は「Open」を出さない
                 const openHtml = (it.url && !it.is_tweet)
                     ? '<div class="nbtn"><a href="' + esc(it.url) + '" target="_blank" rel="noopener noreferrer">Open</a></div>'
@@ -2855,9 +2963,12 @@ auto_on = st.sidebar.toggle(
     key="auto_on",
 )
 
-# ★デフォルト160本・文字サイズ16px (ユーザー指定)
-limit = st.sidebar.slider("表示件数", 10, 200, int(st.session_state.get("limit_default", 160)), 5)
-title_px = st.sidebar.slider("見出し（ヘッドライン本文）文字サイズ(px)", 12, 26, 16, 1)
+# ★デフォルト200本・文字サイズ20px (ユーザー指定 2026/10/11)
+#   変えたいときは下の 2 つの数字だけ書き換えればOK
+DEFAULT_NEWS_LIMIT = 200      # 表示件数のデフォルト (スライダー上限も 200)
+DEFAULT_TITLE_PX = 20         # 見出しの文字サイズのデフォルト (px)
+limit = st.sidebar.slider("表示件数", 10, 200, int(st.session_state.get("limit_default", DEFAULT_NEWS_LIMIT)), 5)
+title_px = st.sidebar.slider("見出し（ヘッドライン本文）文字サイズ(px)", 12, 26, DEFAULT_TITLE_PX, 1)
 compact = st.sidebar.toggle("詰めて表示（余白少なめ）", value=True)
 show_source = st.sidebar.toggle("出典を表示", value=True)
 show_time = st.sidebar.toggle("日時を表示", value=True)

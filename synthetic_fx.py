@@ -56,6 +56,27 @@ _INSTRUMENT_RANGES: List[Tuple[str, float, float]] = [
                                  # 上限149: ドル円(150-170)と衝突しないよう敢えて絞る
 ]
 
+# ★ 金曜終値からの許容乖離率 (2026/10/11 追加)
+#   2026/9/5 に sekai-kabuka のレイアウトが変わり、「原油」の欄で
+#   銀(シルバー, 60ドル台)の値を拾うようになった (原油は90ドル前後)。
+#   金曜終値 (Yahoo) からこれ以上離れた値は「別銘柄を拾った」とみなして表示しない。
+#   週末の CFD がこれほど動くことは通常ないので、本物の値は落とさない。
+_MAX_DEVIATION: Dict[str, float] = {
+    "dow":    0.08,   # ±8%
+    "nas100": 0.10,   # ±10%
+    "oil":    0.20,   # ±20%  (銀 60ドル vs 原油 90ドル = -34% は弾かれる)
+}
+
+
+def _near_ref(name: str, val: Optional[float], ref: Optional[float]) -> bool:
+    """val が基準値 ref (金曜終値) から許容範囲内か。ref が無い時はチェックしない (True)。"""
+    if val is None:
+        return False
+    tol = _MAX_DEVIATION.get(name)
+    if not ref or ref <= 0 or tol is None:
+        return True
+    return abs(val - ref) / ref <= tol
+
 # =====================================================
 # 独立キャッシュ (既存の _X_REAL_CACHE 等とは完全分離)
 # =====================================================
@@ -394,7 +415,8 @@ def _extract_current_from_svg(svg_text: str, low: float, high: float) -> Optiona
         return None
 
 
-def _parse_sekai_q_calls(text: str) -> Dict[str, Dict[str, float]]:
+def _parse_sekai_q_calls(text: str,
+                         refs: Optional[Dict[str, Optional[float]]] = None) -> Dict[str, Dict[str, float]]:
     """
     q(count, low, high, offset, samples, 'svg...') の羅列を解析。
 
@@ -404,8 +426,12 @@ def _parse_sekai_q_calls(text: str) -> Dict[str, Dict[str, float]]:
 
     各エントリのSVGパス末尾を解析して 'current' 値を抽出。失敗時は None。
 
+    refs (金曜終値) が渡された銘柄は、そこから大きく離れた候補を捨てる
+    (例: 原油レンジ 30〜149 に入ってしまう銀の q() を除外)。
+
     返り値: { "dow": {low, high, current}, "nas100": {...}, "oil": {...} }
     """
+    refs = refs or {}
     candidates: Dict[str, List[Dict[str, float]]] = {}
 
     matches = list(_Q_PATTERN.finditer(text))
@@ -442,6 +468,16 @@ def _parse_sekai_q_calls(text: str) -> Dict[str, Dict[str, float]]:
 
     out: Dict[str, Dict[str, float]] = {}
     for name, cands in candidates.items():
+        # ★ 金曜終値から大きく離れた候補 (=別銘柄) を除外
+        ref = refs.get(name)
+        cands = [
+            c for c in cands
+            if _near_ref(name,
+                         c["current"] if c.get("current") is not None else (c["low"] + c["high"]) / 2,
+                         ref)
+        ]
+        if not cands:
+            continue
         # 候補が2つ以上あれば2番目(サンデー版/24h版)を採用
         chosen = cands[1] if len(cands) >= 2 else cands[0]
         entry = {"low": chosen["low"], "high": chosen["high"]}
@@ -452,15 +488,26 @@ def _parse_sekai_q_calls(text: str) -> Dict[str, Dict[str, float]]:
     return out
 
 
-def _fetch_sekai_indices() -> Dict[str, Any]:
+def _fetch_sekai_indices(refs: Optional[Dict[str, Optional[float]]] = None) -> Dict[str, Any]:
     """sekai-kabuka.com からダウ/NAS100/原油を取得。常にdictを返し、失敗時は error に理由を入れる
 
     優先順位:
       1) sekai_indices.json (GitHub Actions が DOMスクレイプ。本家と完全一致の現在値)
       2) sekai_data_url.txt の q() データ → SVG パース (フォールバック)
+
+    refs = 金曜終値 {"dow": ..., "nas100": ..., "oil": ...}。
+    ここから大きく外れた値 (=別銘柄を拾った値) は採用しない。
     """
-    # ── DOM 取得値を最優先で読む
-    dom_vals = _read_dom_indices()
+    refs = refs or {}
+    rejected: Dict[str, float] = {}
+
+    # ── DOM 取得値を最優先で読む (金曜終値から外れすぎた値は捨てる)
+    dom_vals = {}
+    for name, v in _read_dom_indices().items():
+        if name in _MAX_DEVIATION and not _near_ref(name, v, refs.get(name)):
+            rejected[name] = v
+            continue
+        dom_vals[name] = v
 
     # ── 既存ロジック: データURLから q() を取って SVG パース
     url, url_source = _discover_sekai_data_url()
@@ -488,7 +535,7 @@ def _fetch_sekai_indices() -> Dict[str, Any]:
             except Exception:
                 text = r.text or ""
             try:
-                parsed = _parse_sekai_q_calls(text)
+                parsed = _parse_sekai_q_calls(text, refs)
             except Exception as e:
                 err = f"parse_error: {e}"
         else:
@@ -506,6 +553,18 @@ def _fetch_sekai_indices() -> Dict[str, Any]:
             # parsed にエントリが無くてもDOMだけで成立させる
             parsed[name] = {"low": dom_val, "high": dom_val, "current": dom_val}
 
+    # ── 最終チェック: q() 由来で current が無い (レンジ中央値になる) 場合も含めて確認
+    for name in list(parsed.keys()):
+        if name not in _MAX_DEVIATION:
+            continue
+        e = parsed[name]
+        val = e.get("current")
+        if val is None:
+            val = (e["low"] + e["high"]) / 2
+        if not _near_ref(name, val, refs.get(name)):
+            rejected.setdefault(name, val)
+            del parsed[name]
+
     if not parsed:
         return {
             "data": {},
@@ -513,6 +572,7 @@ def _fetch_sekai_indices() -> Dict[str, Any]:
             "url": url,
             "url_source": url_source if url else "none",
             "dom_count": len(dom_vals),
+            "rejected": rejected,
         }
 
     return {
@@ -521,6 +581,7 @@ def _fetch_sekai_indices() -> Dict[str, Any]:
         "url": url,
         "url_source": url_source if url else "none",
         "dom_count": len(dom_vals),
+        "rejected": rejected,
     }
 
 
@@ -672,7 +733,7 @@ def fetch_synthetic_fx() -> Dict[str, Any]:
 
         is_we = _is_weekend_jst()
 
-        # 土日のみ: 合成USDJPY と sekai-kabuka
+        # 土日のみ: 合成USDJPY (sekai-kabuka は金曜終値を取った後で取得する)
         synth_usdjpy = None
         sekai_result: Dict[str, Any] = {"data": {}, "error": None, "url": None}
         if is_we:
@@ -680,10 +741,6 @@ def fetch_synthetic_fx() -> Dict[str, Any]:
                 synth_usdjpy = _compute_synth_usdjpy()
             except Exception as e:
                 synth_usdjpy = {"value": None, "error": f"例外: {type(e).__name__}"}
-            try:
-                sekai_result = _fetch_sekai_indices()
-            except Exception as e:
-                sekai_result = {"data": {}, "error": f"例外: {type(e).__name__}", "url": None}
 
         # 平日も土日も: Yahoo経由の再計算
         recalc: Dict[str, Optional[dict]] = {"jp225": None, "us100": None, "usdjpy": None}
@@ -736,6 +793,13 @@ def fetch_synthetic_fx() -> Dict[str, Any]:
             except Exception:
                 pass
 
+            # ★ sekai-kabuka は金曜終値を「基準値」として渡して取得する
+            #   (基準から大きく外れた値 = 別銘柄を拾った値 は表示しない)
+            try:
+                sekai_result = _fetch_sekai_indices(prev_closes)
+            except Exception as e:
+                sekai_result = {"data": {}, "error": f"例外: {type(e).__name__}", "url": None}
+
         # 現在JST時刻
         nowjst = _now_jst()
         data = {
@@ -745,6 +809,7 @@ def fetch_synthetic_fx() -> Dict[str, Any]:
             "sekai_error": sekai_result.get("error"),
             "sekai_url": sekai_result.get("url"),
             "sekai_url_source": sekai_result.get("url_source", "n/a"),
+            "sekai_rejected": sekai_result.get("rejected", {}),
             "recalc": recalc,
             "prev_closes": prev_closes,
             "as_of": nowjst.strftime("%H:%M:%S JST"),
@@ -769,6 +834,17 @@ def render_synthetic_fx(data: Dict[str, Any]) -> None:
     if not data:
         return
     is_we = data.get("is_weekend", False)
+    sekai_rejected = data.get("sekai_rejected") or {}
+
+    def _checking_card(label: str) -> str:
+        """取得値が金曜終値から外れすぎて捨てた時の「確認中」カード (間違った数字は出さない)"""
+        return (
+            f'<div class="syn-card syn-weekend syn-dim">'
+            f'<div class="syn-label">{label}</div>'
+            f'<div class="syn-value">--</div>'
+            f'<div class="syn-sub">値を確認中</div>'
+            f'</div>'
+        )
     recalc = data.get("recalc") or {}
     synth = data.get("synth_usdjpy")
     sekai = data.get("sekai") or {}
@@ -854,6 +930,8 @@ def render_synthetic_fx(data: Dict[str, Any]) -> None:
                 f'{chg_html}'
                 f'</div>'
             )
+        elif sekai or "dow" in sekai_rejected:   # 取れなかった/外れ値を捨てた時は「確認中」
+            weekend_row += _checking_card("🇺🇸 土日ダウ")
 
         # ── ② 土日NASDAQ100
         if sekai and "nas100" in sekai:
@@ -869,6 +947,8 @@ def render_synthetic_fx(data: Dict[str, Any]) -> None:
                 f'{chg_html}'
                 f'</div>'
             )
+        elif sekai or "nas100" in sekai_rejected:   # 取れなかった/外れ値を捨てた時は「確認中」
+            weekend_row += _checking_card("🇺🇸 土日NASDAQ100")
 
         # ── ③ 土日ドル円
         if synth and synth.get("value"):
@@ -903,9 +983,11 @@ def render_synthetic_fx(data: Dict[str, Any]) -> None:
                 f'{chg_html}'
                 f'</div>'
             )
+        elif sekai or "oil" in sekai_rejected:   # 取れなかった/外れ値を捨てた時は「確認中」
+            weekend_row += _checking_card("🛢 土日原油")
 
         # sekai 全滅時のエラーカード (出所文言なし)
-        if (not sekai) and sekai_error:
+        if (not sekai) and sekai_error and not sekai_rejected:
             weekend_row += (
                 f'<div class="syn-card syn-weekend syn-dim">'
                 f'<div class="syn-label">🌐 株価指数</div>'
