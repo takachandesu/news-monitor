@@ -3,7 +3,7 @@
 # ✅ 条件
 # 1) 別タブ閲覧中でもニュース取得は更新され続ける（バックグラウンド収集）
 # 2) タブに戻った瞬間に最新が表示される（visibilitychangeで自動リロード）
-# 3) デフォルト：更新間隔30秒 / 表示120本
+# 3) デフォルト：更新間隔45秒 / 表示200本
 
 import re
 import time
@@ -243,7 +243,7 @@ def is_bloomberg_source(s: str) -> bool:
 
 # ============================================================
 # ★ 話題による色分け (2026/10/11 追加)
-#   株式に関わる見出し → 太字の黒 / 為替に関わる見出し → 紫
+#   株式に関わる見出し → 太字の黒 / 為替に関わる見出し → 紫の太字
 #   ・ブルームバーグ(青)・ロイター(緑)・速報(赤) の色が優先。
 #     それ以外の「普通の黒字」の見出しだけに適用する。
 #   ・株と為替の両方に当たる見出し (例: 「円安で輸出株高」) は為替(紫)を優先。
@@ -256,16 +256,19 @@ _FX_WORDS_JA = [
     "円買い", "円売り", "ドル買い", "ドル売り", "ユーロ買い", "ユーロ売り",
     "人民元", "通貨安", "通貨高", "レートチェック", "円キャリー",
     "ドル指数", "ドルインデックス", "覆面介入", "円買い介入",
+    "外国為替", "外貨", "証拠金取引",
 ]
 # 為替: 「円安」「ドル高」など。ただし「300円高」「162ドル安」のように
 #       数字が前に付くもの (=株価や原油の値幅) は為替ではないので除外する
 _FX_UPDOWN_RE = re.compile(
     r"(?<![0-9０-９,，.．万千百十億兆])(?:円|ドル|ユーロ|ポンド|ウォン|ルーブル|ルピー|リラ|フラン)(?:高|安)"
 )
+# ★ re.ASCII: 「FX取引」のように英字の直後に日本語が続いても \b が境界と判定されるようにする
+#   (re.ASCII が無いと「X取」が単語の途中扱いになり、「SBI、FX取引で…」が為替判定されなかった)
 _FX_WORDS_EN_RE = re.compile(
     r"\byen\b|\bforex\b|\bFX\b|\bcurrenc(?:y|ies)\b|(?<!-)\bdollar\b(?! (?:General|Tree))|\bsterling\b"
     r"|\bUSD ?/? ?JPY\b|\bEUR ?/? ?USD\b|\bexchange rates?\b",
-    re.IGNORECASE,
+    re.IGNORECASE | re.ASCII,
 )
 
 # 株式: そのまま含まれていれば株式とみなす語
@@ -277,19 +280,30 @@ _STOCK_WORDS_JA = [
     "時価総額", "TOB", "MBO", "空売り", "信用買い", "信用売り", "売買代金",
     "グロース市場", "プライム市場", "スタンダード市場", "ADR", "銘柄",
     "大引け", "前引け", "寄り付き",
+    # ★ 2026/10/13 追加: 場況・相場用語
+    "前場", "後場", "引け値", "悪材料", "好材料", "出尽くし", "買い気配", "売り気配",
+    "地合い", "マザーズ", "ジャスダック",
+]
+# ★ 株式専門の配信元: 為替の語が無ければ見出しの中身にかかわらず株式(黒太字)扱い
+#   (例: 日本証券新聞の「☆[概況/10時] 安川電機は…」、トレーダーズウェブの「後場コメント」)
+_STOCK_SOURCES = [
+    "日本証券新聞", "トレーダーズウェブ", "株探", "かぶたん", "Kabutan",
+    "四季報", "適時開示", "TDnet",
 ]
 # 「ダウ」は「ダウン」「シャットダウン」を、「PTS」は「PTSD」を除外
 _STOCK_DOW_RE = re.compile(r"ダウ(?!ン)|PTS(?!D)")
 # 「株」は株価・株式・米株・自社株など。ただし会社名やウイルスの「株」は除外
+#   ★ 2026/10/13: 英字+株 の除外を「BA.5株」「XBB.1.5株」のような変異株表記
+#     (英大文字 + .数字) だけに限定。以前は「キオクシアHD株価」「NTT株」まで除外していた
 _NON_STOCK_KABU_RE = re.compile(
     r"株式会社|[（(]株[)）]|㈱|(?:変異|ウイルス|オミクロン|デルタ|菌|切り|古|系統|派生)株"
-    r"|[A-Za-z]{2,}[\d.]*株"
+    r"|[A-Z]{1,4}(?:\.\d+)+株"
 )
 _STOCK_WORDS_EN_RE = re.compile(
     r"\bstocks?\b|\bshares\b|\bshare price|\bequit(?:y|ies)\b|\bDow\b|\bNasdaq\b|\bS&P\b"
     r"|\bIPOs?\b|\bearnings\b|\bWall St(?:reet)?\b(?! Journal)|\bNikkei (?:225|average|index|stock)"
     r"|\bTopix\b|\bbuybacks?\b|\bdividends?\b|\bmarket cap",
-    re.IGNORECASE,
+    re.IGNORECASE | re.ASCII,
 )
 
 
@@ -314,7 +328,8 @@ def topic_of(title: str, src: str = "") -> str:
             or "株" in t_kabu
             or _STOCK_DOW_RE.search(t)
             or _STOCK_WORDS_EN_RE.search(t)
-            or (is_x_trend and ("米株" in s or "日本株" in s))):
+            or (is_x_trend and ("米株" in s or "日本株" in s))
+            or any(w in s for w in _STOCK_SOURCES)):
         return "stock"
 
     return ""
@@ -2319,7 +2334,7 @@ class BackgroundCollector:
         self.lock = threading.Lock()
         self.data: Dict[str, object] = {}
         self.last_updated: Optional[str] = None
-        self.interval_sec: int = 30  # ★デフォルト30秒
+        self.interval_sec: int = 45  # ★デフォルト45秒 (2026/10/13 変更)
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
 
@@ -2423,9 +2438,9 @@ def render_items(items: List[Dict], limit: int, show_source: bool, show_time: bo
     .news-title.is-breaking { color: #d32f2f; font-weight: bold; }
     .news-title.is-bbg { color: #1976d2; font-weight: 600; }
     .news-title.is-green { color: #16a34a; font-weight: 600; }
-    /* ★ 株式の話題: 太字の黒 / 為替の話題: 紫 (2026/10/11) */
+    /* ★ 株式の話題: 太字の黒 / 為替の話題: 紫太字 (2026/10/11, 紫の太字化 2026/10/13) */
     .news-title.is-stock { color: #000000; font-weight: bold; }
-    .news-title.is-fx { color: #7b1fa2; }
+    .news-title.is-fx { color: #7b1fa2; font-weight: bold; }
     @media (prefers-color-scheme: dark) {
       .news-title.is-stock { color: #ffffff; }
       .news-title.is-fx { color: #ce93d8; }
@@ -2624,9 +2639,10 @@ def render_items(items: List[Dict], limit: int, show_source: bool, show_time: bo
             color: var(--stock-fg);
             font-weight: bold;
         }}
-        /* ★ 為替の話題：紫 (2026/10/11) */
+        /* ★ 為替の話題：紫太字 (2026/10/11, 太字化 2026/10/13) */
         .ntitle.is-fx {{
             color: var(--fx-fg);
+            font-weight: bold;
         }}
         .nrow.is-new {{
             animation: flowDown 5s ease-out forwards;
@@ -2947,12 +2963,12 @@ st.caption("見出し＋リンクのみを取得します（本文は取得し�
 
 st.sidebar.header("設定")
 
-# ★デフォルト30秒
+# ★デフォルト45秒 (2026/10/13 変更)
 refresh_sec = st.sidebar.number_input(
     "更新間隔（秒）",
     min_value=3,
     max_value=3600,
-    value=int(st.session_state.get("refresh_sec", 30)),
+    value=int(st.session_state.get("refresh_sec", 45)),
     step=1,
     key="refresh_sec",
 )
