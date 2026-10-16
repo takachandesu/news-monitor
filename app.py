@@ -289,6 +289,7 @@ _STOCK_WORDS_JA = [
 _STOCK_SOURCES = [
     "日本証券新聞", "トレーダーズウェブ", "株探", "かぶたん", "Kabutan",
     "四季報", "適時開示", "TDnet",
+    "X／rumor",   # X の「rumor × 株」投稿 (2026/10/16)
 ]
 # 「ダウ」は「ダウン」「シャットダウン」を、「PTS」は「PTSD」を除外
 _STOCK_DOW_RE = re.compile(r"ダウ(?!ン)|PTS(?!D)")
@@ -1612,6 +1613,66 @@ X_REAL_KEYWORDS_EN = [
     "oil", "intervention", "inflation",
 ]
 
+# ============================================================
+# ★ X で「rumor」を含む株関連の投稿を拾う (2026/10/16 追加)
+#   ・X 全体を TwitterAPI.io の advanced_search で検索（上の4アカウントと同じ 15分スロットで取得）
+#   ・条件: rumor / rumors / rumour / rumours ＋ 株関連の語 ＋ 英語 ＋ いいね10以上
+#     (リプライ・リツイートは除外)。いいねの下限は X_RUMOR_MIN_FAVES で調整。
+#   ・一度拾った投稿は X_RUMOR_KEEP_HOURS 時間、一覧に残す（通常の X 速報は直近60分だけ）。
+#   ・表示は「@投稿者: 本文 ♥いいね数」。出典は「X／rumor(株)」→ ワード検索で「rumor」でも絞れる。
+#   ・自動ツイート (post_to_x.py) には一切使われない。
+# ============================================================
+X_RUMOR_MIN_FAVES = 10
+X_RUMOR_KEEP_HOURS = 24
+X_RUMOR_SOURCE = "X／rumor(株)"
+X_RUMOR_QUERY = (
+    '(rumor OR rumors OR rumour OR rumours) '
+    '(stock OR stocks OR shares OR equities OR fund OR funds OR "hedge fund" OR '
+    'Nasdaq OR "S&P" OR SPX OR Dow OR Nikkei OR earnings OR IPO OR '
+    'merger OR acquisition OR takeover OR buyout OR "short seller") '
+    'lang:en -filter:replies -filter:retweets min_faves:' + str(X_RUMOR_MIN_FAVES)
+)
+# 念のため手元でも確認: 本文に rumor 系の語があり、かつ株関連の語(または $銘柄)があること
+_X_RUMOR_WORD_RE = re.compile(r"\brumou?rs?\b", re.IGNORECASE)
+_X_RUMOR_STOCK_RE = re.compile(
+    r"\$[A-Za-z]{1,6}\b"
+    r"|\b(?:stocks?|shares|share price|equit(?:y|ies)|funds?|hedge funds?|nasdaq|s&p|spx|dow"
+    r"|nikkei|earnings|ipos?|mergers?|acquisitions?|takeovers?|buyouts?|short sellers?)\b",
+    re.IGNORECASE,
+)
+
+
+def _x_rumor_items_from_tweets(tweets: List[Dict]) -> List[Dict]:
+    """advanced_search の結果から、rumor×株 の投稿だけをニュース項目にする。"""
+    out: List[Dict] = []
+    for t in tweets or []:
+        text = t.get("text") or ""
+        if not text or t.get("isReply") or text.startswith("RT @") or t.get("retweeted_tweet"):
+            continue
+        if not (_X_RUMOR_WORD_RE.search(text) and _X_RUMOR_STOCK_RE.search(text)):
+            continue
+        author = t.get("author") or {}
+        handle = (author.get("userName") or "").strip()
+        tid = t.get("id")
+        url = t.get("url") or (f"https://x.com/{handle or 'i'}/status/{tid}" if tid else "")
+        if not url:
+            continue
+        one_line = " ".join(text.split())
+        body = one_line[:200] + ("…" if len(one_line) > 200 else "")
+        likes = t.get("likeCount")
+        title = (f"@{handle}: " if handle else "") + body + (f" ♥{likes}" if isinstance(likes, int) else "")
+        out.append({
+            "source": X_RUMOR_SOURCE,
+            "title": title,
+            "url": url,
+            "published": t.get("createdAt") or None,
+            "is_breaking": False,   # うわさなので赤(速報)にはしない。色は話題(株=黒太字)で決まる
+            "is_green": False,
+            "is_rumor": True,
+        })
+    return out
+
+
 # キャッシュ（プロセス内メモリ。10分間保持）
 # ★ @st.cache_resource で「スクリプト再実行をまたいで同じ辞書」を返すようにする。
 #   これをしないと、Streamlit は画面操作（サイドバーを開く等）のたびに module-level
@@ -2047,6 +2108,29 @@ def fetch_x_real_tweets() -> List[Dict]:
             "raw": raw_count,
             "passed": passed_count,
         })
+
+    # ★ X 全体から「rumor × 株」の投稿を検索 (2026/10/16 追加)
+    #   拾った投稿は X_RUMOR_KEEP_HOURS 時間保持する（スロットごとに消えないように）
+    rumor_store: Dict[str, Dict] = cache.setdefault("rumor_store", {})
+    try:
+        time.sleep(5)   # 前のアカウントから5秒あける（レート制限回避）
+        r_tweets, r_status = _twitterapi_io_search(X_RUMOR_QUERY + " since:" + since_str, api_key)
+        r_items = _x_rumor_items_from_tweets(r_tweets)
+        for it in r_items:
+            prev = rumor_store.get(it["url"])
+            it["_kept_at"] = prev["_kept_at"] if prev else now
+            rumor_store[it["url"]] = it   # いいね数などは最新に更新
+        diag["per_account"].append({
+            "handle": "rumor検索(株)", "status": r_status,
+            "raw": len(r_tweets or []), "passed": len(r_items),
+        })
+    except Exception as e:
+        diag["per_account"].append({
+            "handle": "rumor検索(株)", "status": "exception:" + type(e).__name__, "raw": 0, "passed": 0,
+        })
+    for k in [k for k, v in rumor_store.items() if now - v.get("_kept_at", now) > X_RUMOR_KEEP_HOURS * 3600]:
+        rumor_store.pop(k, None)
+    items.extend(dict(v) for v in rumor_store.values())
 
     # キャッシュ更新（シングルトン辞書に対して）
     cache["items"] = items
@@ -2600,8 +2684,8 @@ def render_items(items: List[Dict], limit: int, show_source: bool, show_time: bo
         SEARCH_POOL_MAX = 800
         pool_n = max(int(limit), SEARCH_POOL_MAX)
 
-        # キーワード監視の記事 (is_watch) は直近 SEARCH_POOL_MAX 件より古くても検索対象に入れる
-        search_pool = list(items[:pool_n]) + [it for it in items[pool_n:] if it.get("is_watch")]
+        # キーワード監視の記事 (is_watch) と X の rumor 投稿 (is_rumor) は直近 SEARCH_POOL_MAX 件より古くても検索対象に入れる
+        search_pool = list(items[:pool_n]) + [it for it in items[pool_n:] if it.get("is_watch") or it.get("is_rumor")]
 
         items_data = []
         shown = 0
