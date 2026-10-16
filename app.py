@@ -1612,6 +1612,127 @@ X_REAL_KEYWORDS_EN = [
     "oil", "intervention", "inflation",
 ]
 
+# ============================================================
+# ★ X で「rumor」を含む金融市場のうわさを拾う (2026/10/16 追加)
+#   ・X 全体を TwitterAPI.io の advanced_search で検索（上の4アカウントと同じ 15分スロットで取得）
+#   ・条件: rumor / rumors / rumour / rumours ＋ 金融市場の語 ＋ 英語 ＋ いいね10以上
+#     (リプライ・リツイートは除外)。芸能・スポーツ・ゲーム・新製品などのうわさは拾わない。
+#   ・金融市場の語は X_RUMOR_MARKET_TERMS で管理。X の検索条件と手元の確認の両方に使うので、
+#     語を足す/減らすときはこのリストを直すだけでOK。2語以上は "..." で囲む（語順どおりの一致）。
+#     グループごとに X へ1回ずつ問い合わせる（1回の検索条件が長くなりすぎないように）。
+#   ・「stock」(在庫の意味) と「shares」(動詞 "shares a rumor") は紛らわしいので、
+#     金融の使い方 (stock market / shares of ...) のときだけ通す。
+#   ・いいねの下限は X_RUMOR_MIN_FAVES で調整。
+#   ・一度拾った投稿は X_RUMOR_KEEP_HOURS 時間、一覧に残す（通常の X 速報は直近60分だけ）。
+#   ・表示は「@投稿者: 本文 ♥いいね数」を赤の太字で。出典は「X／rumor(金融)」→ ワード検索で「rumor」でも絞れる。
+#   ・自動ツイート (post_to_x.py) には一切使われない。
+# ============================================================
+X_RUMOR_MIN_FAVES = 10
+X_RUMOR_KEEP_HOURS = 24
+X_RUMOR_SOURCE = "X／rumor(金融)"
+X_RUMOR_MARKET_TERMS: List[Tuple[str, List[str]]] = [
+    ("株・企業", [
+        "stock", "stocks", "shares", "equities", '"Wall Street"', "Nasdaq", '"S&P"', "SPX", "Dow", "Nikkei",
+        "earnings", "IPO", "merger", "acquisition", "takeover", "buyout", '"short seller"', '"short sellers"',
+        '"short squeeze"', '"trading halt"', '"market crash"', "bankruptcy", "delisting",
+    ]),
+    ("中銀・金利・為替・債券", [
+        '"the Fed"', '"Federal Reserve"', "FOMC", "Powell", "BOJ", '"Bank of Japan"', "ECB",
+        '"rate cut"', '"rate hike"', '"interest rate"', '"interest rates"',
+        "yen", "JPY", "USDJPY", '"the dollar"', '"dollar index"', "DXY", "eurozone", "forex",
+        "Treasuries", "Treasury", "yields", '"bond market"', "tariff", "tariffs", "recession",
+    ]),
+    ("ファンド・銀行・商品・暗号資産", [
+        "fund", "funds", '"hedge fund"', '"hedge funds"', "insolvency", "insolvent", "bailout",
+        "bank", "banks", '"bank run"', '"margin call"', "liquidation", "liquidating", '"debt default"',
+        "oil", '"crude oil"', "OPEC", '"gold price"', '"gold prices"', "bullion",
+        "bitcoin", "BTC", "ethereum", "crypto", "stablecoin", "Binance",
+    ]),
+]
+
+
+def _x_rumor_queries() -> List[Tuple[str, str]]:
+    """グループごとの X 検索条件 [(グループ名, クエリ), ...] を組み立てる。"""
+    out: List[Tuple[str, str]] = []
+    for label, terms in X_RUMOR_MARKET_TERMS:
+        q = (
+            "(rumor OR rumors OR rumour OR rumours) (" + " OR ".join(terms) + ") "
+            "lang:en -filter:replies -filter:retweets min_faves:" + str(X_RUMOR_MIN_FAVES)
+        )
+        out.append((label, q))
+    return out
+
+
+# 手元での確認用: 本文に rumor 系の語があり、かつ金融市場の語 (または $銘柄) があること
+_X_RUMOR_WORD_RE = re.compile(r"\brumou?rs?\b", re.IGNORECASE)
+
+
+def _x_rumor_build_market_re() -> "re.Pattern":
+    parts = [r"\$[A-Za-z]{1,6}\b"]   # $TSLA のような銘柄記号
+    for _label, terms in X_RUMOR_MARKET_TERMS:
+        for t in terms:
+            w = t.strip('"')
+            if w.lower() in ("stock", "shares"):
+                continue   # 下の専用パターンで判定（在庫の stock / 動詞の shares を除くため）
+            parts.append(r"\b" + r"\s+".join(re.escape(x) for x in w.split()) + r"\b")
+    return re.compile("|".join(parts), re.IGNORECASE)
+
+
+_X_RUMOR_MARKET_RE = _x_rumor_build_market_re()
+# 「in stock」「out of stock」「stock up」「stock photo」などの在庫・素材の意味を除く
+_X_RUMOR_STOCK_NOUN_RE = re.compile(
+    r"(?<!\bin\s)(?<!\bof\s)\bstock\b(?!\s+(?:up|photos?|images?|footage|arriving|alerts?|checks?|updates?)\b)",
+    re.IGNORECASE,
+)
+# 「shares a rumor」「shares his thoughts」のような動詞の shares を除く（"shares of" "shares fell" は通す）
+_X_RUMOR_SHARES_NOUN_RE = re.compile(
+    r"\bshares\b(?!\s+(?:a|an|the|his|her|their|its|this|that|these|those|new|rumou?rs?|details?|thoughts?"
+    r"|what|why|how|updates?|more|photos?|videos?|screenshots?|first|look|leaks?|info|insights?|stor(?:y|ies)"
+    r"|posts?|clips?|statements?|reactions?|opinions?|takes?|hints?|teasers?|images?|pics?|concepts?|renders?"
+    r"|lists?|everything|some|him|them|us|you|me)\b)",
+    re.IGNORECASE,
+)
+
+
+def _x_rumor_is_market(text: str) -> bool:
+    return bool(
+        _X_RUMOR_MARKET_RE.search(text)
+        or _X_RUMOR_STOCK_NOUN_RE.search(text)
+        or _X_RUMOR_SHARES_NOUN_RE.search(text)
+    )
+
+
+def _x_rumor_items_from_tweets(tweets: List[Dict]) -> List[Dict]:
+    """advanced_search の結果から、rumor × 金融市場 の投稿だけをニュース項目にする。"""
+    out: List[Dict] = []
+    for t in tweets or []:
+        text = t.get("text") or ""
+        if not text or t.get("isReply") or text.startswith("RT @") or t.get("retweeted_tweet"):
+            continue
+        if not (_X_RUMOR_WORD_RE.search(text) and _x_rumor_is_market(text)):
+            continue
+        author = t.get("author") or {}
+        handle = (author.get("userName") or "").strip()
+        tid = t.get("id")
+        url = t.get("url") or (f"https://x.com/{handle or 'i'}/status/{tid}" if tid else "")
+        if not url:
+            continue
+        one_line = " ".join(text.split())
+        body = one_line[:200] + ("…" if len(one_line) > 200 else "")
+        likes = t.get("likeCount")
+        title = (f"@{handle}: " if handle else "") + body + (f" ♥{likes}" if isinstance(likes, int) else "")
+        out.append({
+            "source": X_RUMOR_SOURCE,
+            "title": title,
+            "url": url,
+            "published": t.get("createdAt") or None,
+            "is_breaking": True,    # ★ 金融市場のうわさは赤の太字で表示 (ユーザー指定 2026/10/16)
+            "is_green": False,
+            "is_rumor": True,
+        })
+    return out
+
+
 # キャッシュ（プロセス内メモリ。10分間保持）
 # ★ @st.cache_resource で「スクリプト再実行をまたいで同じ辞書」を返すようにする。
 #   これをしないと、Streamlit は画面操作（サイドバーを開く等）のたびに module-level
@@ -2047,6 +2168,30 @@ def fetch_x_real_tweets() -> List[Dict]:
             "raw": raw_count,
             "passed": passed_count,
         })
+
+    # ★ X 全体から「rumor × 金融市場」の投稿を検索 (2026/10/16 追加)
+    #   グループごとに1回ずつ問い合わせ、拾った投稿は X_RUMOR_KEEP_HOURS 時間保持する
+    rumor_store: Dict[str, Dict] = cache.setdefault("rumor_store", {})
+    for g_label, g_query in _x_rumor_queries():
+        try:
+            time.sleep(5)   # 直前の問い合わせから5秒あける（レート制限回避）
+            r_tweets, r_status = _twitterapi_io_search(g_query + " since:" + since_str, api_key)
+            r_items = _x_rumor_items_from_tweets(r_tweets)
+            for it in r_items:
+                prev = rumor_store.get(it["url"])
+                it["_kept_at"] = prev["_kept_at"] if prev else now
+                rumor_store[it["url"]] = it   # いいね数などは最新に更新
+            diag["per_account"].append({
+                "handle": f"rumor検索({g_label})", "status": r_status,
+                "raw": len(r_tweets or []), "passed": len(r_items),
+            })
+        except Exception as e:
+            diag["per_account"].append({
+                "handle": f"rumor検索({g_label})", "status": "exception:" + type(e).__name__, "raw": 0, "passed": 0,
+            })
+    for k in [k for k, v in rumor_store.items() if now - v.get("_kept_at", now) > X_RUMOR_KEEP_HOURS * 3600]:
+        rumor_store.pop(k, None)
+    items.extend(dict(v) for v in rumor_store.values())
 
     # キャッシュ更新（シングルトン辞書に対して）
     cache["items"] = items
@@ -2600,8 +2745,8 @@ def render_items(items: List[Dict], limit: int, show_source: bool, show_time: bo
         SEARCH_POOL_MAX = 800
         pool_n = max(int(limit), SEARCH_POOL_MAX)
 
-        # キーワード監視の記事 (is_watch) は直近 SEARCH_POOL_MAX 件より古くても検索対象に入れる
-        search_pool = list(items[:pool_n]) + [it for it in items[pool_n:] if it.get("is_watch")]
+        # キーワード監視の記事 (is_watch) と X の rumor 投稿 (is_rumor) は直近 SEARCH_POOL_MAX 件より古くても検索対象に入れる
+        search_pool = list(items[:pool_n]) + [it for it in items[pool_n:] if it.get("is_watch") or it.get("is_rumor")]
 
         items_data = []
         shown = 0
