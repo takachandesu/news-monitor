@@ -425,6 +425,8 @@ WATCH_KEYWORD_FEEDS = [
 ]
 WATCH_KEYWORD_TTL_SEC = 120
 _WATCH_KEYWORD_CACHE: Dict[Tuple[str, str], Tuple[float, List[Dict]]] = {}
+# サイドバーの診断表示用（最後に取得した時刻・件数・エラー）
+_WATCH_KEYWORD_DIAG: Dict[str, object] = {"last_at": None, "count": None, "errors": []}
 
 
 def fetch_watch_keywords() -> List[Dict]:
@@ -434,6 +436,8 @@ def fetch_watch_keywords() -> List[Dict]:
     ]
     now = time.time()
     out: List[Dict] = []
+    errors: List[str] = []
+    fetched_any = False
     for label, query in WATCH_KEYWORD_FEEDS:
         for ed, hl, gl, ceid in editions:
             ck = (query, ed)
@@ -443,13 +447,20 @@ def fetch_watch_keywords() -> List[Dict]:
                 continue
             try:
                 got = fetch_google_news(query, f"{label}(Google News {ed})", hl=hl, gl=gl, ceid=ceid)
+                for it in got:
+                    it["is_watch"] = True
                 _WATCH_KEYWORD_CACHE[ck] = (now, got)
                 out.extend(got)
-            except Exception:
+                fetched_any = True
+            except Exception as e:
+                errors.append(f"{ed}: {type(e).__name__}: {e}")
                 # 取得失敗時は前回の結果があればそれを使う（他のソースの取得は止めない）
                 if cached:
                     out.extend(cached[1])
-    return dedupe(out)
+    out = dedupe(out)
+    if fetched_any or errors:
+        _WATCH_KEYWORD_DIAG.update(last_at=now, count=len(out), errors=errors)
+    return out
 
 
 def fetch_nsj_sokuhou(url: str, source_name: str) -> List[Dict]:
@@ -2382,6 +2393,7 @@ class BackgroundCollector:
         self.interval_sec: int = 45  # ★デフォルト45秒 (2026/10/13 変更)
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
+        self._fetch_fn = None
 
         # 初回検知時刻（first_seen）を保持
         self.seen_at: Dict[str, float] = {}
@@ -2413,13 +2425,20 @@ class BackgroundCollector:
         return out
 
     def start(self, fetch_fn):
+        # ★ 2026/10/16: 毎回「最新の取得関数」に差し替える。
+        #   以前は最初に起動した時の取得関数を使い続けていたため、app.py を更新しても
+        #   アプリを再起動 (Reboot) するまで新しいニュースソースが取得されなかった。
+        with self.lock:
+            self._fetch_fn = fetch_fn
         if self._thread and self._thread.is_alive():
             return
 
         def loop():
             while not self._stop.is_set():
                 try:
-                    new_data = fetch_fn()
+                    with self.lock:
+                        current_fetch = self._fetch_fn
+                    new_data = current_fetch()
                     with self.lock:
                         self.data = new_data
                         self.last_updated = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -2441,8 +2460,28 @@ class BackgroundCollector:
             return dict(self.data), self.last_updated, int(self.interval_sec)
 
 
+def _stop_old_collectors() -> None:
+    """
+    古いコードのまま動き続けている収集スレッドを止める。
+    (新しい収集係を作る時だけ呼ぶ。二重にニュースを取りに行かないように)
+    """
+    import gc
+    for obj in gc.get_objects():
+        try:
+            if type(obj).__name__ == "BackgroundCollector" and isinstance(getattr(obj, "_stop", None), threading.Event):
+                obj._stop.set()
+        except Exception:
+            pass
+
+
+# ★ 収集の仕組み自体を変えた時はこの数字を 1 増やす → 古い収集係を止めて新しく作り直す
+#   (ニュースソースの追加だけなら増やさなくてOK: 取得関数は毎回最新に差し替わる)
+COLLECTOR_VERSION = 2
+
+
 @st.cache_resource
-def get_collector() -> BackgroundCollector:
+def get_collector(version: int = COLLECTOR_VERSION) -> BackgroundCollector:
+    _stop_old_collectors()
     return BackgroundCollector()
 
 # -----------------------------
@@ -2561,11 +2600,12 @@ def render_items(items: List[Dict], limit: int, show_source: bool, show_time: bo
         SEARCH_POOL_MAX = 800
         pool_n = max(int(limit), SEARCH_POOL_MAX)
 
+        # キーワード監視の記事 (is_watch) は直近 SEARCH_POOL_MAX 件より古くても検索対象に入れる
+        search_pool = list(items[:pool_n]) + [it for it in items[pool_n:] if it.get("is_watch")]
+
         items_data = []
         shown = 0
-        for it in items:
-            if shown >= pool_n:
-                break
+        for it in search_pool:
             title = (it.get("title") or "").strip()
             url   = (it.get("url")   or "").strip()
             src   = (it.get("source") or "").strip()
@@ -3183,6 +3223,12 @@ def fetch_all_sources(collector: BackgroundCollector) -> Dict[str, object]:
         all_full.extend(lst)
     all_full = dedupe(all_full)
     all_full = sort_items_by_effective_time_desc(all_full)
+    # ★ キーワード監視で見つかった記事に印を付ける（他ソースと重複して残った方にも付ける）。
+    #   印の付いた記事は、古くてもワード検索の対象に必ず含める。
+    _watch_urls = {it.get("url") for it in watch_kw if it.get("url")}
+    for it in all_full:
+        if it.get("url") in _watch_urls:
+            it["is_watch"] = True
 
     # ★ Yahoo! 由来の記事をすべてのソースから二重に除外（ユーザー指定）
     # source か URL に "yahoo" "ヤフー" を含む場合スキップ。
@@ -3298,7 +3344,7 @@ scroll_speed = 120  # 旧ticker用・互換のため残す（未使用）
 # -----------------------------
 # Start background collection (server side)
 # -----------------------------
-collector = get_collector()
+collector = get_collector(COLLECTOR_VERSION)
 collector.set_interval(int(refresh_sec))
 collector.start(lambda: fetch_all_sources(collector))
 
@@ -3346,6 +3392,15 @@ else:
         )
 
 st.sidebar.caption(f"収集更新（サーバー側）：{running_interval} 秒ごと")
+# ★ キーワード監視 (VARA AI など) の取得状況
+_wk_n = len(data_snapshot.get("watch_kw", []) or []) if isinstance(data_snapshot, dict) else 0
+_wk_at = _WATCH_KEYWORD_DIAG.get("last_at")
+_wk_at_s = (datetime.fromtimestamp(_wk_at, tz=timezone(timedelta(hours=9))).strftime("%H:%M:%S")
+            if _wk_at else "まだ取得していません")
+_wk_labels = "・".join(dict.fromkeys(lbl for lbl, _q in WATCH_KEYWORD_FEEDS))
+st.sidebar.caption(f"🔎 キーワード監視（{_wk_labels}）：{_wk_n}件（最終取得 {_wk_at_s}）")
+for _err in (_WATCH_KEYWORD_DIAG.get("errors") or []):
+    st.sidebar.caption(f"⚠️ キーワード監視の取得エラー {_err}")
 st.sidebar.caption(f"最終収集時刻：{last_updated if last_updated else '（収集中…）'}")
 
 # -----------------------------
