@@ -407,6 +407,51 @@ def fetch_google_news(query: str, source_name: str, hl="ja", gl="JP", ceid="JP:j
     return fetch_rss_feed(url, source_name=source_name)
 
 
+# ============================================================
+# ★ キーワード監視ソース (2026/10/16 追加)
+#   指定した語句を含むニュースを Google News (英語版・日本語版) から取得して一覧に加える。
+#   ・監視したい語句を増やす時は、下の WATCH_KEYWORD_FEEDS に 1 行足すだけでOK。
+#   ・"..." で囲むとその語順のまま完全一致、OR で「どれか1つを含む」。
+#   ・出典名に「VARA AI関連」と入るので、画面上部のワード検索で「VARA」と打てば全部出る。
+#   ・Google News に負荷をかけないよう、取得は WATCH_KEYWORD_TTL_SEC 秒に 1 回だけ
+#     (それ以外の更新では前回の結果を使い回す)。
+# ============================================================
+WATCH_KEYWORD_FEEDS = [
+    # (出典名に付ける名前, Google News 検索クエリ)
+    # VARA = AI特化型ヘッジファンド Value Aligned Research Advisors
+    #   ※「VARA ヘッジファンド」のような広い検索は、ドバイの仮想資産規制当局(同じく VARA)の
+    #     ニュースまで拾ってしまうため、正式名と「VARA AI」の完全一致だけにしている
+    ("VARA AI関連", '"VARA AI" OR "Value Aligned Research Advisors"'),
+]
+WATCH_KEYWORD_TTL_SEC = 120
+_WATCH_KEYWORD_CACHE: Dict[Tuple[str, str], Tuple[float, List[Dict]]] = {}
+
+
+def fetch_watch_keywords() -> List[Dict]:
+    editions = [
+        ("JP", "ja",    "JP", "JP:ja"),
+        ("EN", "en-US", "US", "US:en"),
+    ]
+    now = time.time()
+    out: List[Dict] = []
+    for label, query in WATCH_KEYWORD_FEEDS:
+        for ed, hl, gl, ceid in editions:
+            ck = (query, ed)
+            cached = _WATCH_KEYWORD_CACHE.get(ck)
+            if cached and now - cached[0] < WATCH_KEYWORD_TTL_SEC:
+                out.extend(cached[1])
+                continue
+            try:
+                got = fetch_google_news(query, f"{label}(Google News {ed})", hl=hl, gl=gl, ceid=ceid)
+                _WATCH_KEYWORD_CACHE[ck] = (now, got)
+                out.extend(got)
+            except Exception:
+                # 取得失敗時は前回の結果があればそれを使う（他のソースの取得は止めない）
+                if cached:
+                    out.extend(cached[1])
+    return dedupe(out)
+
+
 def fetch_nsj_sokuhou(url: str, source_name: str) -> List[Dict]:
     """
     nsjournal.jp/category/nsj_short_live/sokuhou/ をスクレイピング。
@@ -3047,6 +3092,12 @@ def fetch_all_sources(collector: BackgroundCollector) -> Dict[str, object]:
     yomiuri = fetch_yomiuri()
     sankei  = fetch_sankei()
 
+    # ★ キーワード監視（VARA AI など。語句は WATCH_KEYWORD_FEEDS で設定）
+    try:
+        watch_kw = fetch_watch_keywords()
+    except Exception:
+        watch_kw = []
+
     # first_seen を付与
     bloomberg_en      = collector.attach_first_seen(bloomberg_en)
     bloomberg_ja      = collector.attach_first_seen(bloomberg_ja)
@@ -3062,6 +3113,7 @@ def fetch_all_sources(collector: BackgroundCollector) -> Dict[str, object]:
     yahoo_bbg         = collector.attach_first_seen(yahoo_bbg)
     yomiuri           = collector.attach_first_seen(yomiuri)
     sankei            = collector.attach_first_seen(sankei)
+    watch_kw          = collector.attach_first_seen(watch_kw)
 
     # ── X 関連の取得（互いに巻き込まれないよう、それぞれ個別に try/except で防護） ──
     import sys as _sys
@@ -3126,7 +3178,8 @@ def fetch_all_sources(collector: BackgroundCollector) -> Dict[str, object]:
                 x_home, x_4accounts, x_real, x_trends,
                 tbs_bloomberg, sbi_fund,
                 yahoo_bbg,
-                yomiuri, sankei]:
+                yomiuri, sankei,
+                watch_kw]:   # ★ 最後に置く: 他ソースと同じ記事なら他ソース側(色付き)を残す
         all_full.extend(lst)
     all_full = dedupe(all_full)
     all_full = sort_items_by_effective_time_desc(all_full)
@@ -3167,6 +3220,7 @@ def fetch_all_sources(collector: BackgroundCollector) -> Dict[str, object]:
     sbi_fund          = _drop_yahoo(sbi_fund)
     yomiuri           = _drop_yahoo(yomiuri)
     sankei            = _drop_yahoo(sankei)
+    watch_kw          = _drop_yahoo(watch_kw)
 
     return {
         "all_full":        all_full,
@@ -3193,6 +3247,7 @@ def fetch_all_sources(collector: BackgroundCollector) -> Dict[str, object]:
         "sbi_fund":        sort_items_by_effective_time_desc(dedupe(sbi_fund)),
         "yomiuri":         sort_items_by_effective_time_desc(dedupe(yomiuri)),
         "sankei":          sort_items_by_effective_time_desc(dedupe(sankei)),
+        "watch_kw":        sort_items_by_effective_time_desc(dedupe(watch_kw)),
     }
 
 # -----------------------------
