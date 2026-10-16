@@ -2511,10 +2511,15 @@ def render_items(items: List[Dict], limit: int, show_source: bool, show_time: bo
 
         import json as _json
 
+        # ★ ワード検索 (2026/10/16): 通常は先頭 limit 件を表示し、
+        #   検索中は SEARCH_POOL_MAX 件までさかのぼって探す
+        SEARCH_POOL_MAX = 800
+        pool_n = max(int(limit), SEARCH_POOL_MAX)
+
         items_data = []
         shown = 0
         for it in items:
-            if shown >= limit:
+            if shown >= pool_n:
                 break
             title = (it.get("title") or "").strip()
             url   = (it.get("url")   or "").strip()
@@ -2534,6 +2539,7 @@ def render_items(items: List[Dict], limit: int, show_source: bool, show_time: bo
             key  = (url or title).strip()
             items_data.append({
                 "key": key, "title": title, "url": url, "meta": meta,
+                "src": src,                      # 検索用 (出典名でも絞り込めるように)
                 "is_breaking": is_breaking,
                 "is_bbg": is_bloomberg_source(src),
                 "is_green": is_green,
@@ -2542,7 +2548,10 @@ def render_items(items: List[Dict], limit: int, show_source: bool, show_time: bo
             })
             shown += 1
 
-        items_json = _json.dumps(items_data, ensure_ascii=False)
+        SEARCH_BAR_H = 44   # ★ 検索バーの高さ(px)
+
+        # 見出しに "</script>" が含まれていても <script> が途中で閉じないようにする
+        items_json = _json.dumps(items_data, ensure_ascii=False).replace("</", "<\\/")
 
         push_html = f"""
         <script>
@@ -2578,6 +2587,10 @@ def render_items(items: List[Dict], limit: int, show_source: bool, show_time: bo
             --new-hl:    rgba(255,210,0,0.22);
             --stock-fg:  #ffffff;
             --fx-fg:     #ce93d8;
+            --input-bg:  rgba(255,255,255,0.06);
+            --bar-bg:    #161a23;
+            --mark-bg:   rgba(255,210,0,0.38);
+            --focus:     #4f8cff;
         }}
         :root[data-theme="light"] {{
             --bg:        #ffffff;
@@ -2591,6 +2604,10 @@ def render_items(items: List[Dict], limit: int, show_source: bool, show_time: bo
             --new-hl:    rgba(255,210,0,0.35);
             --stock-fg:  #000000;
             --fx-fg:     #7b1fa2;
+            --input-bg:  #ffffff;
+            --bar-bg:    #f6f7f9;
+            --mark-bg:   #ffe36e;
+            --focus:     #1976d2;
         }}
         html, body {{
             margin: 0; padding: 0;
@@ -2598,11 +2615,89 @@ def render_items(items: List[Dict], limit: int, show_source: bool, show_time: bo
             color: var(--fg);
             font-family: "Source Sans Pro", sans-serif;
         }}
+        /* ★ ワード検索 (2026/10/16): 枠の上部に検索バーを固定し、その下だけスクロール */
+        #news-box {{
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            overflow: hidden;
+            background: var(--bg);
+        }}
+        #news-search {{
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 6px 10px;
+            background: var(--bar-bg);
+            border-bottom: 1px solid var(--border);
+            box-sizing: border-box;
+            height: {SEARCH_BAR_H}px;
+        }}
+        .nsearch-field {{
+            position: relative;
+            flex: 1 1 auto;
+            min-width: 0;
+        }}
+        .nsearch-field svg {{
+            position: absolute;
+            left: 9px; top: 50%;
+            transform: translateY(-50%);
+            width: 15px; height: 15px;
+            stroke: var(--meta-fg);
+            pointer-events: none;
+        }}
+        #nq {{
+            width: 100%;
+            box-sizing: border-box;
+            height: 30px;
+            padding: 0 30px 0 31px;
+            font-size: 15px;
+            font-family: inherit;
+            color: var(--fg);
+            background: var(--input-bg);
+            border: 1px solid var(--btn-bdr);
+            border-radius: 6px;
+            outline: none;
+        }}
+        #nq::placeholder {{ color: var(--meta-fg); }}
+        #nq:focus {{
+            border-color: var(--focus);
+            box-shadow: 0 0 0 2px color-mix(in srgb, var(--focus) 25%, transparent);
+        }}
+        #nq-clear {{
+            position: absolute;
+            right: 4px; top: 50%;
+            transform: translateY(-50%);
+            width: 22px; height: 22px;
+            border: none; border-radius: 50%;
+            background: transparent;
+            color: var(--meta-fg);
+            font-size: 16px; line-height: 22px;
+            cursor: pointer;
+            display: none;
+            padding: 0;
+        }}
+        #nq-clear:hover {{ background: var(--btn-bg); color: var(--fg); }}
+        #nq-count {{
+            flex: 0 0 auto;
+            font-size: 12px;
+            color: var(--meta-fg);
+            white-space: nowrap;
+        }}
+        #nq-count.is-zero {{ color: #d32f2f; }}
+        mark.nhit {{
+            background: var(--mark-bg);
+            color: inherit;
+            border-radius: 2px;
+            padding: 0 1px;
+        }}
+        .nempty {{
+            padding: 18px 4px;
+            color: var(--meta-fg);
+            font-size: 14px;
+        }}
         #news-feed {{
             height: {scroll_height}px;
             overflow-y: auto;
-            border: 1px solid var(--border);
-            border-radius: 8px;
             padding: 6px 10px;
             box-sizing: border-box;
             background: var(--bg);
@@ -2688,14 +2783,36 @@ def render_items(items: List[Dict], limit: int, show_source: bool, show_time: bo
             margin-top: 4px;
         }}
         </style>
-        <div id="news-feed"></div>
+        <div id="news-box">
+          <div id="news-search">
+            <div class="nsearch-field">
+              <svg viewBox="0 0 24 24" fill="none" stroke-width="2.4" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
+              <input id="nq" type="text" enterkeyhint="search" autocomplete="off" spellcheck="false"
+                     placeholder="ワード検索（スペース区切りでAND・出典名もOK・Escでクリア）">
+              <button id="nq-clear" type="button" title="クリア" aria-label="検索をクリア">×</button>
+            </div>
+            <span id="nq-count"></span>
+          </div>
+          <div id="news-feed"></div>
+        </div>
         <div id="news-status"></div>
         <script>
         (function() {{
             const ITEMS    = {items_json};
+            const VIEW_N   = {int(limit)};              // 通常時に表示する件数
             const SEEN_KEY = 'news_seen_v2';
+            // ★ ワード検索 (2026/10/16): 検索語はタブを閉じるまで保持し、自動更新(再描画)後も復元する
+            const Q_KEY    = 'news_search_q_v1';
+            const QF_KEY   = 'news_search_focus_v1';
+            const QC_KEY   = 'news_search_caret_v1';
             const feed     = document.getElementById('news-feed');
             const status   = document.getElementById('news-status');
+            const qInput   = document.getElementById('nq');
+            const qClear   = document.getElementById('nq-clear');
+            const qCount   = document.getElementById('nq-count');
+
+            const viewItems = ITEMS.slice(0, VIEW_N);
+            const restItems = ITEMS.slice(VIEW_N);   // 検索時だけ使う、表示件数より古い見出し
 
             // localStorage から既読セットを復元（iframe内なのでwindow.parent経由）
             let seenArr = [];
@@ -2705,25 +2822,85 @@ def render_items(items: List[Dict], limit: int, show_source: bool, show_time: bo
             }} catch(e) {{}}
             const seenSet = new Set(seenArr);
 
-            // 新着 / 既読に分類
-            const newItems = ITEMS.filter(it => it.key && !seenSet.has(it.key));
-            const oldItems = ITEMS.filter(it => !it.key || seenSet.has(it.key));
+            // 新着 / 既読に分類（表示範囲内だけ）
+            const newItems = viewItems.filter(it => it.key && !seenSet.has(it.key));
+            const oldItems = viewItems.filter(it => !it.key || seenSet.has(it.key));
+            const newKeys  = new Set(newItems.map(it => it.key));
 
-            // 全件を既読登録（最大3000件に制限）
-            ITEMS.forEach(it => {{ if (it.key) seenSet.add(it.key); }});
+            // 表示範囲の全件を既読登録（最大3000件に制限）
+            viewItems.forEach(it => {{ if (it.key) seenSet.add(it.key); }});
             try {{
                 window.parent.localStorage.setItem(SEEN_KEY, JSON.stringify([...seenSet].slice(-3000)));
             }} catch(e) {{}}
+
+            // 新着を上、既読を下、その後ろに検索専用の古い見出し
+            const ORDERED  = [...newItems, ...oldItems, ...restItems];
+            const newLabel = newItems.length > 0 ? '🆕 新着 ' + newItems.length + '件　' : '';
 
             function esc(s) {{
                 return (s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
             }}
 
-            function makeRow(it, isNew) {{
+            // ── 検索用の正規化: 全角/半角・大文字/小文字を区別しない（ＦＸ = FX = fx）
+            //    1文字ずつ正規化して「正規化後の位置 → 元の位置」を記録し、ハイライトに使う
+            function normMap(s) {{
+                let text = '';
+                const start = [], end = [];
+                let i = 0;
+                for (const ch of (s || '')) {{
+                    const n = ch.normalize('NFKC').toLowerCase();
+                    for (let k = 0; k < n.length; k++) {{ start.push(i); end.push(i + ch.length); }}
+                    text += n;
+                    i += ch.length;
+                }}
+                return {{ text: text, start: start, end: end }};
+            }}
+            function parseQuery(q) {{
+                return normMap(q).text.split(/[\\s\\u3000]+/).filter(Boolean);
+            }}
+            let prepared = false;
+            function prep() {{
+                if (prepared) return;
+                ITEMS.forEach(it => {{
+                    it._nt  = normMap(it.title);
+                    it._nm  = normMap(it.meta);
+                    // 見出し・出典・日時をつなげた検索対象（区切りは入力できない制御文字）
+                    it._hay = it._nt.text + '\\u0001' + normMap(it.src).text + '\\u0001' + it._nm.text;
+                }});
+                prepared = true;
+            }}
+            function highlight(raw, nm, terms) {{
+                if (!raw) return '';
+                if (!terms.length || !nm) return esc(raw);
+                const ranges = [];
+                terms.forEach(t => {{
+                    let from = 0, idx;
+                    while ((idx = nm.text.indexOf(t, from)) !== -1) {{
+                        ranges.push([nm.start[idx], nm.end[idx + t.length - 1]]);
+                        from = idx + t.length;
+                    }}
+                }});
+                if (!ranges.length) return esc(raw);
+                ranges.sort((a, b) => a[0] - b[0]);
+                const merged = [];
+                ranges.forEach(r => {{
+                    const last = merged[merged.length - 1];
+                    if (last && r[0] <= last[1]) last[1] = Math.max(last[1], r[1]);
+                    else merged.push([r[0], r[1]]);
+                }});
+                let html = '', pos = 0;
+                merged.forEach(r => {{
+                    html += esc(raw.slice(pos, r[0])) + '<mark class="nhit">' + esc(raw.slice(r[0], r[1])) + '</mark>';
+                    pos = r[1];
+                }});
+                return html + esc(raw.slice(pos));
+            }}
+
+            function makeRow(it, isNew, terms) {{
                 const row = document.createElement('div');
                 row.className = 'nrow' + (isNew ? ' is-new' : '');
                 // ★ is_bbg → 青字 / is_green → 緑字 / is_breaking → 赤太字
-                //   それ以外: 為替の話題 → 紫 / 株式の話題 → 太字の黒
+                //   それ以外: 為替の話題 → 紫太字 / 株式の話題 → 太字の黒
                 const titleClass = it.is_bbg ? 'ntitle is-bbg'
                                  : (it.is_green ? 'ntitle is-green'
                                  : (it.is_breaking ? 'ntitle is-breaking'
@@ -2735,26 +2912,89 @@ def render_items(items: List[Dict], limit: int, show_source: bool, show_time: bo
                     : '';
                 row.innerHTML =
                     openHtml +
-                    '<div class="' + titleClass + '">' + esc(it.title) +
-                    (it.meta ? '<span class="nmeta"> (' + esc(it.meta) + ')</span>' : '') +
+                    '<div class="' + titleClass + '">' + highlight(it.title, it._nt, terms) +
+                    (it.meta ? '<span class="nmeta"> (' + highlight(it.meta, it._nm, terms) + ')</span>' : '') +
                     '</div>';
                 return row;
             }}
 
-            // 新着を上、既読を下に描画
-            [...newItems, ...oldItems].forEach(function(it, i) {{
-                feed.appendChild(makeRow(it, i < newItems.length));
+            // ── sessionStorage（親フレーム）: 失敗しても検索自体は動くように try で包む
+            function sget(k) {{ try {{ return window.parent.sessionStorage.getItem(k); }} catch(e) {{ return null; }} }}
+            function sset(k, v) {{ try {{ window.parent.sessionStorage.setItem(k, v); }} catch(e) {{}} }}
+
+            let firstRender = true;
+            function render() {{
+                const rawQ  = qInput.value;
+                const terms = parseQuery(rawQ);
+                qClear.style.display = rawQ ? 'block' : 'none';
+
+                let list;
+                if (terms.length) {{
+                    prep();
+                    list = ORDERED.filter(it => terms.every(t => it._hay.indexOf(t) !== -1));
+                }} else {{
+                    list = ORDERED.slice(0, VIEW_N);
+                }}
+
+                const frag = document.createDocumentFragment();
+                // 新着のアニメーションは最初の描画だけ（キー入力のたびに再生しない）
+                list.forEach(it => frag.appendChild(makeRow(it, firstRender && newKeys.has(it.key), terms)));
+                feed.replaceChildren(frag);
+                if (terms.length && list.length === 0) {{
+                    feed.innerHTML = '<div class="nempty">「' + esc(rawQ.trim()) + '」に一致する見出しはありません（直近 ' + ITEMS.length + '件を検索）</div>';
+                }}
+                feed.scrollTop = 0;
+                firstRender = false;
+
+                if (terms.length) {{
+                    qCount.textContent = list.length + '件ヒット';
+                    qCount.classList.toggle('is-zero', list.length === 0);
+                    status.textContent = '🔍 直近 ' + ITEMS.length + '件から検索中　' + list.length + '件ヒット';
+                }} else {{
+                    qCount.textContent = '';
+                    qCount.classList.remove('is-zero');
+                    status.textContent = newLabel + '計 ' + list.length + '件　▼スクロールで続きを見る';
+                }}
+            }}
+
+            function onQueryChange() {{
+                sset(Q_KEY, qInput.value);
+                sset(QC_KEY, String(qInput.selectionStart || 0));
+                render();
+            }}
+
+            // 日本語入力(IME)の変換中は絞り込まず、確定した時点で検索する
+            let composing = false;
+            qInput.addEventListener('compositionstart', () => {{ composing = true; }});
+            qInput.addEventListener('compositionend',   () => {{ composing = false; onQueryChange(); }});
+            qInput.addEventListener('input', e => {{ if (composing || e.isComposing) return; onQueryChange(); }});
+            qInput.addEventListener('keydown', e => {{
+                if (e.key === 'Escape' && qInput.value) {{ qInput.value = ''; onQueryChange(); }}
             }});
+            qClear.addEventListener('click', () => {{ qInput.value = ''; onQueryChange(); qInput.focus(); }});
 
-            feed.scrollTop = 0;
+            // 自動更新で枠が作り直されても、入力中だったらカーソルを戻す
+            //   (blur 時の setTimeout は枠の作り直し時には実行されない → '1' が残る)
+            qInput.addEventListener('focus', () => sset(QF_KEY, '1'));
+            qInput.addEventListener('blur',  () => {{ setTimeout(() => sset(QF_KEY, '0'), 0); }});
 
-            const newLabel = newItems.length > 0 ? '🆕 新着 ' + newItems.length + '件　' : '';
-            status.textContent = newLabel + '計 ' + ITEMS.length + '件　▼スクロールで続きを見る';
+            qInput.value = sget(Q_KEY) || '';
+            render();
+
+            if (sget(QF_KEY) === '1') {{
+                try {{
+                    qInput.focus({{ preventScroll: true }});
+                    const c   = parseInt(sget(QC_KEY) || '', 10);
+                    const pos = isNaN(c) ? qInput.value.length : Math.min(c, qInput.value.length);
+                    qInput.setSelectionRange(pos, pos);
+                }} catch(e) {{}}
+            }}
         }})();
         </script>
         """
         # components.html でレンダリング（st.markdownはscriptを実行しないため）
-        components.html(push_html, height=scroll_height + 40, scrolling=False)
+        #   高さ = ニュース欄 + 検索バー + 枠線 + 下のステータス行
+        components.html(push_html, height=scroll_height + SEARCH_BAR_H + 2 + 40, scrolling=False)
     else:
         st.markdown(rows_html, unsafe_allow_html=True)
 
