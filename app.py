@@ -1631,7 +1631,7 @@ X_REAL_KEYWORDS_EN = [
 
 # ============================================================
 # ★ X で「rumor」を含む金融市場のうわさを拾う (2026/10/16 追加)
-#   ・X 全体を TwitterAPI.io の advanced_search で検索（上の4アカウントと同じ 15分スロットで取得）
+#   ・X 全体を TwitterAPI.io の advanced_search で検索（X_RUMOR_EVERY_MIN 分ごと。初期値 30分）
 #   ・条件: rumor / rumors / rumour / rumours ＋ 金融市場の語 ＋ 英語 ＋ いいね10以上
 #     (リプライ・リツイートは除外)。芸能・スポーツ・ゲーム・新製品などのうわさは拾わない。
 #   ・金融市場の語は X_RUMOR_MARKET_TERMS で管理。X の検索条件と手元の確認の両方に使うので、
@@ -1646,12 +1646,15 @@ X_REAL_KEYWORDS_EN = [
 # ============================================================
 X_RUMOR_MIN_FAVES = 10
 X_RUMOR_KEEP_HOURS = 24
+# ★ rumor 検索の間隔(分)。速報の取得 (15分ごと) の何回かに1回だけ X に問い合わせる (費用を抑えるため)
+#   30 = 毎時 :01 と :31 の2回。15 にすると速報と同じ毎回。
+X_RUMOR_EVERY_MIN = 30
 X_RUMOR_SOURCE = "X／rumor(金融)"
 # ★ X への検索条件1本の長さ上限（since: を含む）。実績のある長さ (約320文字) に合わせ、
 #   語が増えても自動で複数の検索に分ける。長すぎる条件は X が結果を返さないことがある。
 X_RUMOR_QUERY_MAX_CHARS = 320
 # ★ X 取得のコードを変えたら +1 する → 更新後の最初の取得を 15分スロットを待たずに行う
-X_REAL_FETCH_VERSION = 3
+X_REAL_FETCH_VERSION = 4
 # 金融市場の語（大事なものを先に。2語以上は "..." で囲む = 語順どおりの一致）
 X_RUMOR_MARKET_TERMS: List[str] = [
     # 株式・指数
@@ -1744,9 +1747,10 @@ def x_rumor_status_lines(snapshot: Dict) -> List[str]:
         d = _get_x_real_cache().get("diag", {}) or {}
         rows = [r for r in (d.get("per_account") or []) if str(r.get("handle", "")).startswith("rumor検索")]
         n = sum(1 for it in (snapshot.get("all_full", []) or []) if it.get("is_rumor")) if isinstance(snapshot, dict) else 0
-        at = int(d.get("last_attempt_at") or 0)
+        c = _get_x_real_cache()
+        at = int(c.get("rumor_last_at") or 0)
         at_s = datetime.fromtimestamp(at, tz=jst).strftime("%H:%M:%S") if at else "まだ取得していません"
-        lines.append(f"💬 X rumor(金融)：{n}件（X への最終問い合わせ {at_s}）")
+        lines.append(f"💬 X rumor(金融)：{n}件（X への最終問い合わせ {at_s}、{X_RUMOR_EVERY_MIN}分ごと）")
         if rows:
             lines.append("　" + " ／ ".join(
                 f"{str(r.get('handle','')).replace('rumor検索 ', '')} {r.get('status')} → {r.get('passed', 0)}件"
@@ -2276,19 +2280,29 @@ def fetch_x_real_tweets() -> List[Dict]:
             })
             return 0
 
-    total_raw = 0
-    queries = _x_rumor_queries(rumor_mode)
-    for g_label, g_query in queries:
-        total_raw += _run_rumor_query(f"{g_label}({rumor_mode})", g_query)
+    # ★ 前回の rumor 検索から X_RUMOR_EVERY_MIN 分たっていなければ今回は検索しない (費用節約)。
+    #   2分の余裕はスロット時刻のずれ対策。コード更新直後 (rumor_last_at=0) は必ず検索する。
+    rumor_last_at = int(cache.get("rumor_last_at") or 0)
+    if now - rumor_last_at >= X_RUMOR_EVERY_MIN * 60 - 120:
+        n_before = len(diag["per_account"])
+        total_raw = 0
+        queries = _x_rumor_queries(rumor_mode)
+        for g_label, g_query in queries:
+            total_raw += _run_rumor_query(f"{g_label}({rumor_mode})", g_query)
 
-    if total_raw == 0:
-        # 探り①: 絞り込み演算子なし (simple)。返ってくるなら以後 simple を使う
-        if rumor_mode == "full":
-            s_label, s_query = _x_rumor_queries("simple")[0]
-            if _run_rumor_query(f"探り simple {s_label}", s_query) > 0:
-                cache["rumor_mode"] = "simple"
-        # 探り②: 「rumor」1語だけ。これも 0 件なら X への問い合わせ自体に問題がある
-        _run_rumor_query("探り rumorだけ", "rumor")
+        if total_raw == 0:
+            # 探り①: 絞り込み演算子なし (simple)。返ってくるなら以後 simple を使う
+            if rumor_mode == "full":
+                s_label, s_query = _x_rumor_queries("simple")[0]
+                if _run_rumor_query(f"探り simple {s_label}", s_query) > 0:
+                    cache["rumor_mode"] = "simple"
+            # 探り②: 「rumor」1語だけ。これも 0 件なら X への問い合わせ自体に問題がある
+            _run_rumor_query("探り rumorだけ", "rumor")
+        cache["rumor_last_at"] = now
+        cache["rumor_rows"] = [dict(r) for r in diag["per_account"][n_before:]]
+    else:
+        # 今回は検索しない回: 前回の診断行をそのまま出しておく (表示が消えないように)
+        diag["per_account"].extend(dict(r) for r in (cache.get("rumor_rows") or []))
     for k in [k for k, v in rumor_store.items() if now - v.get("_kept_at", now) > X_RUMOR_KEEP_HOURS * 3600]:
         rumor_store.pop(k, None)
     items.extend(dict(v) for v in rumor_store.values())
