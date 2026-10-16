@@ -1651,7 +1651,7 @@ X_RUMOR_SOURCE = "X／rumor(金融)"
 #   語が増えても自動で複数の検索に分ける。長すぎる条件は X が結果を返さないことがある。
 X_RUMOR_QUERY_MAX_CHARS = 320
 # ★ X 取得のコードを変えたら +1 する → 更新後の最初の取得を 15分スロットを待たずに行う
-X_REAL_FETCH_VERSION = 2
+X_REAL_FETCH_VERSION = 3
 # 金融市場の語（大事なものを先に。2語以上は "..." で囲む = 語順どおりの一致）
 X_RUMOR_MARKET_TERMS: List[str] = [
     # 株式・指数
@@ -1673,10 +1673,19 @@ X_RUMOR_MARKET_TERMS: List[str] = [
 ]
 
 
-def _x_rumor_queries() -> List[Tuple[str, str]]:
+# ★ X に送る条件の種類。"full" で結果が1件も返らない場合は自動で "simple" に切り替える
+#   (TwitterAPI.io が -filter: / min_faves: などを受け付けない場合に備える)。
+#   "simple" では絞り込み (返信・RT除外、いいね数) をこちら側で行う。
+X_RUMOR_MODE_TAILS = {
+    "full":   ") lang:en -filter:replies -filter:retweets min_faves:" + str(X_RUMOR_MIN_FAVES),
+    "simple": ") lang:en",
+}
+
+
+def _x_rumor_queries(mode: str = "full") -> List[Tuple[str, str]]:
     """X への検索条件を [(番号, クエリ), ...] で返す。長さ上限に収まるように語を自動で分ける。"""
     head = "(rumor OR rumors OR rumour OR rumours) ("
-    tail = ") lang:en -filter:replies -filter:retweets min_faves:" + str(X_RUMOR_MIN_FAVES)
+    tail = X_RUMOR_MODE_TAILS.get(mode, X_RUMOR_MODE_TAILS["full"])
     reserve = len(" since:2026-01-01_00:00:00_UTC")
     budget = max(40, X_RUMOR_QUERY_MAX_CHARS - len(head) - len(tail) - reserve)
     groups: List[List[str]] = [[]]
@@ -1727,6 +1736,37 @@ def _x_rumor_is_market(text: str) -> bool:
     )
 
 
+def x_rumor_status_lines(snapshot: Dict) -> List[str]:
+    """ニュース欄の下・サイドバー用: X rumor 検索とキーワード監視の取得状況 (1行ずつ)"""
+    lines: List[str] = []
+    jst = timezone(timedelta(hours=9))
+    try:
+        d = _get_x_real_cache().get("diag", {}) or {}
+        rows = [r for r in (d.get("per_account") or []) if str(r.get("handle", "")).startswith("rumor検索")]
+        n = sum(1 for it in (snapshot.get("all_full", []) or []) if it.get("is_rumor")) if isinstance(snapshot, dict) else 0
+        at = int(d.get("last_attempt_at") or 0)
+        at_s = datetime.fromtimestamp(at, tz=jst).strftime("%H:%M:%S") if at else "まだ取得していません"
+        lines.append(f"💬 X rumor(金融)：{n}件（X への最終問い合わせ {at_s}）")
+        if rows:
+            lines.append("　" + " ／ ".join(
+                f"{str(r.get('handle','')).replace('rumor検索 ', '')} {r.get('status')} → {r.get('passed', 0)}件"
+                for r in rows))
+        if d.get("last_error"):
+            lines.append(f"　⚠️ {d['last_error']}")
+    except Exception as e:
+        lines.append(f"💬 X rumor(金融)：状況を取得できません ({type(e).__name__})")
+    try:
+        wk = _get_watch_cache().get("diag", {}) or {}
+        n = len(snapshot.get("watch_kw", []) or []) if isinstance(snapshot, dict) else 0
+        at = wk.get("last_at")
+        at_s = datetime.fromtimestamp(at, tz=jst).strftime("%H:%M:%S") if at else "まだ取得していません"
+        lines.append(f"🔎 キーワード監視（VARA AI関連）：{n}件（最終取得 {at_s}）"
+                     + ("　⚠️ " + " / ".join(wk.get("errors") or []) if wk.get("errors") else ""))
+    except Exception:
+        pass
+    return lines
+
+
 def _x_rumor_items_from_tweets(tweets: List[Dict]) -> List[Dict]:
     """advanced_search の結果から、rumor × 金融市場 の投稿だけをニュース項目にする。"""
     out: List[Dict] = []
@@ -1736,6 +1776,9 @@ def _x_rumor_items_from_tweets(tweets: List[Dict]) -> List[Dict]:
             continue
         if not (_X_RUMOR_WORD_RE.search(text) and _x_rumor_is_market(text)):
             continue
+        likes = t.get("likeCount")
+        if isinstance(likes, int) and likes < X_RUMOR_MIN_FAVES:
+            continue
         author = t.get("author") or {}
         handle = (author.get("userName") or "").strip()
         tid = t.get("id")
@@ -1744,7 +1787,6 @@ def _x_rumor_items_from_tweets(tweets: List[Dict]) -> List[Dict]:
             continue
         one_line = " ".join(text.split())
         body = one_line[:200] + ("…" if len(one_line) > 200 else "")
-        likes = t.get("likeCount")
         title = (f"@{handle}: " if handle else "") + body + (f" ♥{likes}" if isinstance(likes, int) else "")
         out.append({
             "source": X_RUMOR_SOURCE,
@@ -2004,6 +2046,12 @@ def _twitterapi_io_search(query: str, api_key: str) -> Tuple[List[Dict], str]:
             return [], "no_tweets_key"
 
         last_status = "http:" + str(r.status_code)
+        try:
+            _body = " ".join((r.text or "").split())[:100]
+            if _body:
+                last_status += " " + _body
+        except Exception:
+            pass
         # 429 ならリトライ、それ以外のエラーは即終了
         if r.status_code == 429 and attempt < max_attempts - 1:
             continue
@@ -2038,6 +2086,7 @@ def fetch_x_real_tweets() -> List[Dict]:
     if cache.get("fetch_version") != X_REAL_FETCH_VERSION:
         cache["fetch_version"] = X_REAL_FETCH_VERSION
         cache["fetched_at"] = 0
+        cache.pop("rumor_mode", None)
     if cache["fetched_at"] >= slot_start:
         print(f"[fetch_x_real_tweets] within current slot (fetched_at={cache['fetched_at']}, slot_start={slot_start}), returning {len(cache['items'])} cached items", file=_sys.stderr, flush=True)
         return list(cache["items"])
@@ -2199,25 +2248,47 @@ def fetch_x_real_tweets() -> List[Dict]:
         })
 
     # ★ X 全体から「rumor × 金融市場」の投稿を検索 (2026/10/16 追加)
-    #   グループごとに1回ずつ問い合わせ、拾った投稿は X_RUMOR_KEEP_HOURS 時間保持する
+    #   条件を数本に分けて問い合わせ、拾った投稿は X_RUMOR_KEEP_HOURS 時間保持する。
+    #   全部 0 件なら、条件を簡単にした探り (simple → rumor だけ) を入れて、X が条件を
+    #   受け付けているかを確かめる。simple で返ってくるなら次回から simple を使う。
     rumor_store: Dict[str, Dict] = cache.setdefault("rumor_store", {})
-    for g_label, g_query in _x_rumor_queries():
+    rumor_mode = cache.get("rumor_mode") or "full"
+
+    def _run_rumor_query(label: str, query: str) -> int:
+        """1本問い合わせて rumor_store に入れ、X から返ってきた生の件数を返す"""
         try:
             time.sleep(5)   # 直前の問い合わせから5秒あける（レート制限回避）
-            r_tweets, r_status = _twitterapi_io_search(g_query + " since:" + since_str, api_key)
+            r_tweets, r_status = _twitterapi_io_search(query + " since:" + since_str, api_key)
             r_items = _x_rumor_items_from_tweets(r_tweets)
             for it in r_items:
                 prev = rumor_store.get(it["url"])
                 it["_kept_at"] = prev["_kept_at"] if prev else now
                 rumor_store[it["url"]] = it   # いいね数などは最新に更新
             diag["per_account"].append({
-                "handle": f"rumor検索 {g_label}", "status": r_status,
+                "handle": f"rumor検索 {label}", "status": r_status,
                 "raw": len(r_tweets or []), "passed": len(r_items),
             })
+            return len(r_tweets or [])
         except Exception as e:
             diag["per_account"].append({
-                "handle": f"rumor検索 {g_label}", "status": "exception:" + type(e).__name__, "raw": 0, "passed": 0,
+                "handle": f"rumor検索 {label}", "status": "exception:" + type(e).__name__ + ":" + str(e)[:80],
+                "raw": 0, "passed": 0,
             })
+            return 0
+
+    total_raw = 0
+    queries = _x_rumor_queries(rumor_mode)
+    for g_label, g_query in queries:
+        total_raw += _run_rumor_query(f"{g_label}({rumor_mode})", g_query)
+
+    if total_raw == 0:
+        # 探り①: 絞り込み演算子なし (simple)。返ってくるなら以後 simple を使う
+        if rumor_mode == "full":
+            s_label, s_query = _x_rumor_queries("simple")[0]
+            if _run_rumor_query(f"探り simple {s_label}", s_query) > 0:
+                cache["rumor_mode"] = "simple"
+        # 探り②: 「rumor」1語だけ。これも 0 件なら X への問い合わせ自体に問題がある
+        _run_rumor_query("探り rumorだけ", "rumor")
     for k in [k for k, v in rumor_store.items() if now - v.get("_kept_at", now) > X_RUMOR_KEEP_HOURS * 3600]:
         rumor_store.pop(k, None)
     items.extend(dict(v) for v in rumor_store.values())
@@ -3552,6 +3623,9 @@ if _fragment_decorator is not None:
             items, int(limit), show_source, show_time, title_px, compact,
             auto_scroll, scroll_speed, scroll_height,
         )
+        # ★ X rumor 検索・キーワード監視の取得状況（サイドバーを開かなくても見えるように）
+        for _ln in x_rumor_status_lines(fresh_snapshot):
+            st.caption(_ln)
 else:
     # Streamlit が古くて st.fragment が無い場合のフォールバック（自動更新なし）
     st.warning(
@@ -3566,36 +3640,9 @@ else:
         )
 
 st.sidebar.caption(f"収集更新（サーバー側）：{running_interval} 秒ごと")
-# ★ キーワード監視 (VARA AI など) の取得状況
-_wk_n = len(data_snapshot.get("watch_kw", []) or []) if isinstance(data_snapshot, dict) else 0
-_wk_diag = _get_watch_cache().get("diag", {}) or {}
-_wk_at = _wk_diag.get("last_at")
-_wk_at_s = (datetime.fromtimestamp(_wk_at, tz=timezone(timedelta(hours=9))).strftime("%H:%M:%S")
-            if _wk_at else "まだ取得していません")
-_wk_labels = "・".join(dict.fromkeys(lbl for lbl, _q in WATCH_KEYWORD_FEEDS))
-st.sidebar.caption(f"🔎 キーワード監視（{_wk_labels}）：{_wk_n}件（最終取得 {_wk_at_s}）")
-for _err in (_wk_diag.get("errors") or []):
-    st.sidebar.caption(f"⚠️ キーワード監視の取得エラー {_err}")
-
-# ★ X の rumor 検索 (金融市場) の取得状況
-try:
-    _xr_diag = _get_x_real_cache().get("diag", {}) or {}
-    _rum_rows = [r for r in (_xr_diag.get("per_account") or []) if str(r.get("handle", "")).startswith("rumor検索")]
-    _rum_n = (sum(1 for it in (data_snapshot.get("all_full", []) or []) if it.get("is_rumor"))
-              if isinstance(data_snapshot, dict) else 0)
-    _rum_at = int(_xr_diag.get("last_attempt_at") or 0)
-    _rum_at_s = (datetime.fromtimestamp(_rum_at, tz=timezone(timedelta(hours=9))).strftime("%H:%M:%S")
-                 if _rum_at else "まだ取得していません")
-    _rum_detail = " ／ ".join(
-        f"{str(r.get('handle','')).replace('rumor検索', '検索')} {r.get('status')} → {r.get('passed', 0)}件"
-        for r in _rum_rows
-    )
-    st.sidebar.caption(f"💬 X rumor(金融)：{_rum_n}件（X への最終問い合わせ {_rum_at_s}）")
-    if _rum_detail:
-        st.sidebar.caption("　" + _rum_detail)
-except Exception:
-    pass
-st.sidebar.caption(f"最終収集時刻：{last_updated if last_updated else '（収集中…）'}")
+# ★ X rumor 検索・キーワード監視 (VARA AI など) の取得状況
+for _ln in x_rumor_status_lines(data_snapshot):
+    st.sidebar.caption(_ln)
 
 # -----------------------------
 # ★ 速報X取得の診断パネル（折りたたみ式）
