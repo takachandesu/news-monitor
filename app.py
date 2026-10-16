@@ -424,9 +424,21 @@ WATCH_KEYWORD_FEEDS = [
     ("VARA AI関連", '"VARA AI" OR "Value Aligned Research Advisors"'),
 ]
 WATCH_KEYWORD_TTL_SEC = 120
-_WATCH_KEYWORD_CACHE: Dict[Tuple[str, str], Tuple[float, List[Dict]]] = {}
-# サイドバーの診断表示用（最後に取得した時刻・件数・エラー）
-_WATCH_KEYWORD_DIAG: Dict[str, object] = {"last_at": None, "count": None, "errors": []}
+WATCH_KEYWORD_KEEP_HOURS = 24   # ★ 一度見つけた記事はこの時間だけ一覧に残す (Google News は返す結果が毎回ぶれるため)
+
+
+@st.cache_resource
+def _get_watch_cache() -> Dict[str, object]:
+    """
+    キーワード監視の保存場所。
+    ★ Streamlit は画面操作のたびにスクリプトを頭から実行し直すので、ふつうの変数に入れると
+      そのたびに空に戻る。@st.cache_resource で「同じ辞書」を返し続けるようにする。
+    """
+    return {
+        "tried": {},    # (クエリ, 版) → 最後に Google News へ問い合わせた時刻
+        "store": {},    # 記事URL → 記事 (見つけた時刻つき)。24時間で消す
+        "diag": {"last_at": None, "errors": [], "last_got": {}},
+    }
 
 
 def fetch_watch_keywords() -> List[Dict]:
@@ -434,33 +446,38 @@ def fetch_watch_keywords() -> List[Dict]:
         ("JP", "ja",    "JP", "JP:ja"),
         ("EN", "en-US", "US", "US:en"),
     ]
+    cache = _get_watch_cache()
+    tried: Dict = cache["tried"]
+    store: Dict[str, Dict] = cache["store"]
     now = time.time()
-    out: List[Dict] = []
     errors: List[str] = []
     fetched_any = False
     for label, query in WATCH_KEYWORD_FEEDS:
         for ed, hl, gl, ceid in editions:
             ck = (query, ed)
-            cached = _WATCH_KEYWORD_CACHE.get(ck)
-            if cached and now - cached[0] < WATCH_KEYWORD_TTL_SEC:
-                out.extend(cached[1])
+            if now - tried.get(ck, 0) < WATCH_KEYWORD_TTL_SEC:
                 continue
+            tried[ck] = now
             try:
                 got = fetch_google_news(query, f"{label}(Google News {ed})", hl=hl, gl=gl, ceid=ceid)
+                fetched_any = True
+                cache["diag"]["last_got"][ed] = len(got)
+                # ★ 新しく見つけた記事を足す（前回あって今回なかった記事も、24時間は残す）
                 for it in got:
                     it["is_watch"] = True
-                _WATCH_KEYWORD_CACHE[ck] = (now, got)
-                out.extend(got)
-                fetched_any = True
+                    url = it.get("url") or ""
+                    if not url:
+                        continue
+                    prev = store.get(url)
+                    it["_kept_at"] = prev["_kept_at"] if prev else now
+                    store[url] = it
             except Exception as e:
                 errors.append(f"{ed}: {type(e).__name__}: {e}")
-                # 取得失敗時は前回の結果があればそれを使う（他のソースの取得は止めない）
-                if cached:
-                    out.extend(cached[1])
-    out = dedupe(out)
+    for k in [k for k, v in store.items() if now - v.get("_kept_at", now) > WATCH_KEYWORD_KEEP_HOURS * 3600]:
+        store.pop(k, None)
     if fetched_any or errors:
-        _WATCH_KEYWORD_DIAG.update(last_at=now, count=len(out), errors=errors)
-    return out
+        cache["diag"].update(last_at=now, errors=errors)
+    return dedupe([dict(v) for v in store.values()])
 
 
 def fetch_nsj_sokuhou(url: str, source_name: str) -> List[Dict]:
@@ -1619,7 +1636,7 @@ X_REAL_KEYWORDS_EN = [
 #     (リプライ・リツイートは除外)。芸能・スポーツ・ゲーム・新製品などのうわさは拾わない。
 #   ・金融市場の語は X_RUMOR_MARKET_TERMS で管理。X の検索条件と手元の確認の両方に使うので、
 #     語を足す/減らすときはこのリストを直すだけでOK。2語以上は "..." で囲む（語順どおりの一致）。
-#     グループごとに X へ1回ずつ問い合わせる（1回の検索条件が長くなりすぎないように）。
+#     検索条件は X_RUMOR_QUERY_MAX_CHARS 文字以内になるよう自動で数回に分けて問い合わせる。
 #   ・「stock」(在庫の意味) と「shares」(動詞 "shares a rumor") は紛らわしいので、
 #     金融の使い方 (stock market / shares of ...) のときだけ通す。
 #   ・いいねの下限は X_RUMOR_MIN_FAVES で調整。
@@ -1630,37 +1647,46 @@ X_REAL_KEYWORDS_EN = [
 X_RUMOR_MIN_FAVES = 10
 X_RUMOR_KEEP_HOURS = 24
 X_RUMOR_SOURCE = "X／rumor(金融)"
-X_RUMOR_MARKET_TERMS: List[Tuple[str, List[str]]] = [
-    ("株・企業", [
-        "stock", "stocks", "shares", "equities", '"Wall Street"', "Nasdaq", '"S&P"', "SPX", "Dow", "Nikkei",
-        "earnings", "IPO", "merger", "acquisition", "takeover", "buyout", '"short seller"', '"short sellers"',
-        '"short squeeze"', '"trading halt"', '"market crash"', "bankruptcy", "delisting",
-    ]),
-    ("中銀・金利・為替・債券", [
-        '"the Fed"', '"Federal Reserve"', "FOMC", "Powell", "BOJ", '"Bank of Japan"', "ECB",
-        '"rate cut"', '"rate hike"', '"interest rate"', '"interest rates"',
-        "yen", "JPY", "USDJPY", '"the dollar"', '"dollar index"', "DXY", "eurozone", "forex",
-        "Treasuries", "Treasury", "yields", '"bond market"', "tariff", "tariffs", "recession",
-    ]),
-    ("ファンド・銀行・商品・暗号資産", [
-        "fund", "funds", '"hedge fund"', '"hedge funds"', "insolvency", "insolvent", "bailout",
-        "bank", "banks", '"bank run"', '"margin call"', "liquidation", "liquidating", '"debt default"',
-        "oil", '"crude oil"', "OPEC", '"gold price"', '"gold prices"', "bullion",
-        "bitcoin", "BTC", "ethereum", "crypto", "stablecoin", "Binance",
-    ]),
+# ★ X への検索条件1本の長さ上限（since: を含む）。実績のある長さ (約320文字) に合わせ、
+#   語が増えても自動で複数の検索に分ける。長すぎる条件は X が結果を返さないことがある。
+X_RUMOR_QUERY_MAX_CHARS = 320
+# ★ X 取得のコードを変えたら +1 する → 更新後の最初の取得を 15分スロットを待たずに行う
+X_REAL_FETCH_VERSION = 2
+# 金融市場の語（大事なものを先に。2語以上は "..." で囲む = 語順どおりの一致）
+X_RUMOR_MARKET_TERMS: List[str] = [
+    # 株式・指数
+    "stock", "stocks", "shares", "equities", "Nasdaq", '"S&P"', "SPX", "Dow", "Nikkei", '"Wall Street"',
+    '"market crash"', '"short squeeze"', '"trading halt"',
+    # 企業・M&A・ファンド
+    "earnings", "IPO", "merger", "acquisition", "takeover", "buyout", '"short seller"', '"short sellers"',
+    "bankruptcy", "delisting", "fund", "funds", '"hedge fund"', '"hedge funds"', "insolvency", "insolvent",
+    "liquidation", "liquidating", '"margin call"',
+    # 中央銀行・金利・景気
+    '"the Fed"', '"Federal Reserve"', "FOMC", "Powell", "BOJ", '"Bank of Japan"', "ECB",
+    '"rate cut"', '"rate hike"', '"interest rate"', '"interest rates"', "recession", "tariff", "tariffs",
+    # 為替・債券・銀行
+    "yen", "JPY", "USDJPY", '"the dollar"', '"dollar index"', "DXY", "eurozone", "forex",
+    "Treasuries", "Treasury", "yields", '"bond market"', '"debt default"', "bailout", "bank", "banks", '"bank run"',
+    # 商品・暗号資産
+    "oil", '"crude oil"', "OPEC", '"gold price"', '"gold prices"', "bullion",
+    "bitcoin", "BTC", "ethereum", "crypto", "stablecoin", "Binance",
 ]
 
 
 def _x_rumor_queries() -> List[Tuple[str, str]]:
-    """グループごとの X 検索条件 [(グループ名, クエリ), ...] を組み立てる。"""
-    out: List[Tuple[str, str]] = []
-    for label, terms in X_RUMOR_MARKET_TERMS:
-        q = (
-            "(rumor OR rumors OR rumour OR rumours) (" + " OR ".join(terms) + ") "
-            "lang:en -filter:replies -filter:retweets min_faves:" + str(X_RUMOR_MIN_FAVES)
-        )
-        out.append((label, q))
-    return out
+    """X への検索条件を [(番号, クエリ), ...] で返す。長さ上限に収まるように語を自動で分ける。"""
+    head = "(rumor OR rumors OR rumour OR rumours) ("
+    tail = ") lang:en -filter:replies -filter:retweets min_faves:" + str(X_RUMOR_MIN_FAVES)
+    reserve = len(" since:2026-01-01_00:00:00_UTC")
+    budget = max(40, X_RUMOR_QUERY_MAX_CHARS - len(head) - len(tail) - reserve)
+    groups: List[List[str]] = [[]]
+    for t in X_RUMOR_MARKET_TERMS:
+        if groups[-1] and len(" OR ".join(groups[-1] + [t])) > budget:
+            groups.append([t])
+        else:
+            groups[-1].append(t)
+    n = len(groups)
+    return [(f"{i}/{n}", head + " OR ".join(g) + tail) for i, g in enumerate(groups, 1)]
 
 
 # 手元での確認用: 本文に rumor 系の語があり、かつ金融市場の語 (または $銘柄) があること
@@ -1669,12 +1695,11 @@ _X_RUMOR_WORD_RE = re.compile(r"\brumou?rs?\b", re.IGNORECASE)
 
 def _x_rumor_build_market_re() -> "re.Pattern":
     parts = [r"\$[A-Za-z]{1,6}\b"]   # $TSLA のような銘柄記号
-    for _label, terms in X_RUMOR_MARKET_TERMS:
-        for t in terms:
-            w = t.strip('"')
-            if w.lower() in ("stock", "shares"):
-                continue   # 下の専用パターンで判定（在庫の stock / 動詞の shares を除くため）
-            parts.append(r"\b" + r"\s+".join(re.escape(x) for x in w.split()) + r"\b")
+    for t in X_RUMOR_MARKET_TERMS:
+        w = t.strip('"')
+        if w.lower() in ("stock", "shares"):
+            continue   # 下の専用パターンで判定（在庫の stock / 動詞の shares を除くため）
+        parts.append(r"\b" + r"\s+".join(re.escape(x) for x in w.split()) + r"\b")
     return re.compile("|".join(parts), re.IGNORECASE)
 
 
@@ -2009,6 +2034,10 @@ def fetch_x_real_tweets() -> List[Dict]:
     #   かつ各スロット内で重複取得は起きない。
     now = int(time.time())
     slot_start = _get_current_slot_start(now)
+    # ★ X 取得のコードが更新された直後は、スロットを待たずに1回取得する (2026/10/16)
+    if cache.get("fetch_version") != X_REAL_FETCH_VERSION:
+        cache["fetch_version"] = X_REAL_FETCH_VERSION
+        cache["fetched_at"] = 0
     if cache["fetched_at"] >= slot_start:
         print(f"[fetch_x_real_tweets] within current slot (fetched_at={cache['fetched_at']}, slot_start={slot_start}), returning {len(cache['items'])} cached items", file=_sys.stderr, flush=True)
         return list(cache["items"])
@@ -2182,12 +2211,12 @@ def fetch_x_real_tweets() -> List[Dict]:
                 it["_kept_at"] = prev["_kept_at"] if prev else now
                 rumor_store[it["url"]] = it   # いいね数などは最新に更新
             diag["per_account"].append({
-                "handle": f"rumor検索({g_label})", "status": r_status,
+                "handle": f"rumor検索 {g_label}", "status": r_status,
                 "raw": len(r_tweets or []), "passed": len(r_items),
             })
         except Exception as e:
             diag["per_account"].append({
-                "handle": f"rumor検索({g_label})", "status": "exception:" + type(e).__name__, "raw": 0, "passed": 0,
+                "handle": f"rumor検索 {g_label}", "status": "exception:" + type(e).__name__, "raw": 0, "passed": 0,
             })
     for k in [k for k, v in rumor_store.items() if now - v.get("_kept_at", now) > X_RUMOR_KEEP_HOURS * 3600]:
         rumor_store.pop(k, None)
@@ -3539,13 +3568,33 @@ else:
 st.sidebar.caption(f"収集更新（サーバー側）：{running_interval} 秒ごと")
 # ★ キーワード監視 (VARA AI など) の取得状況
 _wk_n = len(data_snapshot.get("watch_kw", []) or []) if isinstance(data_snapshot, dict) else 0
-_wk_at = _WATCH_KEYWORD_DIAG.get("last_at")
+_wk_diag = _get_watch_cache().get("diag", {}) or {}
+_wk_at = _wk_diag.get("last_at")
 _wk_at_s = (datetime.fromtimestamp(_wk_at, tz=timezone(timedelta(hours=9))).strftime("%H:%M:%S")
             if _wk_at else "まだ取得していません")
 _wk_labels = "・".join(dict.fromkeys(lbl for lbl, _q in WATCH_KEYWORD_FEEDS))
 st.sidebar.caption(f"🔎 キーワード監視（{_wk_labels}）：{_wk_n}件（最終取得 {_wk_at_s}）")
-for _err in (_WATCH_KEYWORD_DIAG.get("errors") or []):
+for _err in (_wk_diag.get("errors") or []):
     st.sidebar.caption(f"⚠️ キーワード監視の取得エラー {_err}")
+
+# ★ X の rumor 検索 (金融市場) の取得状況
+try:
+    _xr_diag = _get_x_real_cache().get("diag", {}) or {}
+    _rum_rows = [r for r in (_xr_diag.get("per_account") or []) if str(r.get("handle", "")).startswith("rumor検索")]
+    _rum_n = (sum(1 for it in (data_snapshot.get("all_full", []) or []) if it.get("is_rumor"))
+              if isinstance(data_snapshot, dict) else 0)
+    _rum_at = int(_xr_diag.get("last_attempt_at") or 0)
+    _rum_at_s = (datetime.fromtimestamp(_rum_at, tz=timezone(timedelta(hours=9))).strftime("%H:%M:%S")
+                 if _rum_at else "まだ取得していません")
+    _rum_detail = " ／ ".join(
+        f"{str(r.get('handle','')).replace('rumor検索', '検索')} {r.get('status')} → {r.get('passed', 0)}件"
+        for r in _rum_rows
+    )
+    st.sidebar.caption(f"💬 X rumor(金融)：{_rum_n}件（X への最終問い合わせ {_rum_at_s}）")
+    if _rum_detail:
+        st.sidebar.caption("　" + _rum_detail)
+except Exception:
+    pass
 st.sidebar.caption(f"最終収集時刻：{last_updated if last_updated else '（収集中…）'}")
 
 # -----------------------------
