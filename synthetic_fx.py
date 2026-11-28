@@ -1102,6 +1102,17 @@ def render_synthetic_fx(data: Dict[str, Any]) -> None:
 }
 /* 土日カードは緑系背景なので黒文字でも十分読める */
 .syn-card.syn-weekend .syn-label{ color: #0a3d1f; }
+/* ウィークエンドカード: 名前を1行で表示 (長い名前のカードは幅を広く取る) */
+.syn-weekend-wrap .syn-card.syn-weekend{ flex: 1 1 auto; }
+.syn-weekend-wrap .syn-card.syn-weekend .syn-label{
+  white-space: nowrap; font-size: 12px; letter-spacing: 0;
+}
+/* スマホなど狭い画面では2列に折り返す */
+@media (max-width: 640px){
+  .syn-weekend-wrap .syn-wrap{ flex-wrap: wrap; }
+  .syn-weekend-wrap .syn-card.syn-weekend{ flex: 1 1 calc(50% - 6px); }
+  .syn-weekend-wrap .syn-card.syn-weekend .syn-label{ font-size: 11px; }
+}
 .syn-value{
   font-size: 22px;
   font-weight: 800;
