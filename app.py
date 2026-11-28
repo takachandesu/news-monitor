@@ -3,7 +3,7 @@
 # ✅ 条件
 # 1) 別タブ閲覧中でもニュース取得は更新され続ける（バックグラウンド収集）
 # 2) タブに戻った瞬間に最新が表示される（visibilitychangeで自動リロード）
-# 3) デフォルト：更新間隔45秒 / 表示200本
+# 3) デフォルト：更新間隔45秒 / 表示300本
 
 import re
 import time
@@ -3602,11 +3602,11 @@ auto_on = st.sidebar.toggle(
     key="auto_on",
 )
 
-# ★デフォルト200本・文字サイズ20px (ユーザー指定 2026/10/11)
+# ★デフォルト300本・文字サイズ20px (ユーザー指定 2026/10/11、件数は 2026/11/28 に 200→300)
 #   変えたいときは下の 2 つの数字だけ書き換えればOK
-DEFAULT_NEWS_LIMIT = 200      # 表示件数のデフォルト (スライダー上限も 200)
+DEFAULT_NEWS_LIMIT = 300      # 表示件数のデフォルト (スライダー上限も 300)
 DEFAULT_TITLE_PX = 20         # 見出しの文字サイズのデフォルト (px)
-limit = st.sidebar.slider("表示件数", 10, 200, int(st.session_state.get("limit_default", DEFAULT_NEWS_LIMIT)), 5)
+limit = st.sidebar.slider("表示件数", 10, 300, int(st.session_state.get("limit_default", DEFAULT_NEWS_LIMIT)), 5)
 title_px = st.sidebar.slider("見出し（ヘッドライン本文）文字サイズ(px)", 12, 26, DEFAULT_TITLE_PX, 1)
 compact = st.sidebar.toggle("詰めて表示（余白少なめ）", value=True)
 show_source = st.sidebar.toggle("出典を表示", value=True)
@@ -3617,8 +3617,9 @@ st.sidebar.subheader("📜 新着プッシュ表示")
 auto_scroll = st.sidebar.toggle("新着を上に自動追加", value=True, key="auto_scroll")
 scroll_height = st.sidebar.slider(
     "表示エリア高さ（px）",
-    min_value=200, max_value=1200,
-    value=int(st.session_state.get("scroll_height_val", 700)),
+    min_value=200, max_value=2000,
+    # ★ 2026/11/28: ニュース欄を 1.6 倍に (700 → 1120px)。埋め込み・別タブ共通
+    value=int(st.session_state.get("scroll_height_val", 1120)),
     step=50,
 )
 scroll_speed = 120  # 旧ticker用・互換のため残す（未使用）
