@@ -4656,7 +4656,20 @@ except Exception:
 #   画面が狭いとき(スマホ等)は Streamlit が自動で縦並びにし、凡例はニュースの下に回る。
 # -----------------------------
 NEWS_COLOR_LEGEND_HTML = """
-<div style="border:1px solid rgba(128,128,128,0.3);border-radius:8px;padding:8px 10px;margin-bottom:8px;font-size:13px;line-height:1.75;white-space:nowrap;overflow:hidden;">
+<style>
+/* ★ 凡例の列は比率ではなく固定幅 (180px) にし、残りをすべてニュース欄に使う。
+     HP 埋め込みのように横幅が狭くても凡例が切れない。スマホ幅 (640px 以下) は Streamlit 既定の縦並びのまま */
+@media (min-width: 641px) {
+  div[data-testid="stColumn"]:has(.news-legend), div.stColumn:has(.news-legend), div[data-testid="column"]:has(.news-legend) {
+    flex: 0 0 180px !important; width: 180px !important; min-width: 180px !important; max-width: 180px !important;
+  }
+  div[data-testid="stHorizontalBlock"]:has(.news-legend) > div:first-child,
+  div.stHorizontalBlock:has(.news-legend) > div:first-child {
+    flex: 1 1 auto !important; width: auto !important; min-width: 0 !important;
+  }
+}
+</style>
+<div class="news-legend" style="border:1px solid rgba(128,128,128,0.3);border-radius:8px;padding:8px 10px;margin-bottom:8px;font-size:13px;line-height:1.75;white-space:nowrap;">
   <div style="font-weight:bold;margin-bottom:2px;">🎨 文字色の意味</div>
   <div><span style="color:#d32f2f;font-weight:bold;">赤（太字）</span>：速報</div>
   <div><span style="color:#1976d2;font-weight:600;">青</span>：Bloomberg</div>
