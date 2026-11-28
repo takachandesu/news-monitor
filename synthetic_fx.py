@@ -1,7 +1,8 @@
 # synthetic_fx.py
 # News Headline Monitor 拡張モジュール
-# - 土日の合成ドル円(bitFlyer × Binance)
-# - 土日の24h株価指数(sekai-kabuka.com スクレイプ)
+# - 土日の価格: DEX (Hyperliquid / trade[XYZ]) の無期限先物から取得 (2026/11/28〜)
+#     S&P500 / NASDAQ100(XYZ100) / ドル円 / WTI原油。変化は「米国金曜の引け(NY16:00)」比
+#   ※ 旧: 合成ドル円(bitFlyer×Binance)・sekai-kabuka.com スクレイプは呼び出し停止 (関数は残置)
 # - 再計算: JP225(JST 15:30基準) / US100(ET 16:00基準) / USDJPY(ET 16:00基準)
 #
 # 設計方針:
@@ -586,6 +587,152 @@ def _fetch_sekai_indices(refs: Optional[Dict[str, Optional[float]]] = None) -> D
 
 
 # =====================================================
+# (0) DEX: Hyperliquid / trade[XYZ]  =  土日 S&P500 / NASDAQ100 / ドル円 / 原油
+# =====================================================
+# trade[XYZ] は Hyperliquid 上の HIP-3 DEX。株価指数・為替・商品の無期限先物が
+# 土日も取引されているので、その価格を「土日の参考値」として使う。
+# 公開APIで認証不要: POST https://api.hyperliquid.xyz/info
+HL_INFO_URL = "https://api.hyperliquid.xyz/info"
+HL_DEX = "xyz"
+
+# 表示する銘柄 (キー, ラベル, 取引所側の銘柄名の候補, 小数桁)
+#   銘柄名は変わることがあるので候補を複数持ち、先に見つかったものを使う
+_DEX_ITEMS: List[Tuple[str, str, List[str], int]] = [
+    ("sp500",  "🇺🇸 ウィークエンドSP500",    ["SP500", "S&P500", "US500", "SPX"], 2),
+    ("nas100", "🇺🇸 ウィークエンドNASDAQ100", ["XYZ100", "NDX", "NAS100"],         2),
+    ("usdjpy", "💴 ウィークエンドドル円",      ["USDJPY", "JPY"],                   3),
+    ("oil",    "🛢 ウィークエンド原油",        ["WTIOIL", "CL", "WTI", "USOIL"],    2),
+]
+
+# 金曜引けからこれ以上動いていたら「おかしな値」とみなして表示しない
+_DEX_MAX_MOVE: Dict[str, float] = {
+    "sp500": 0.10, "nas100": 0.12, "usdjpy": 0.06, "oil": 0.25,
+}
+
+_DEX_BASE_CACHE: Dict[str, float] = {}   # 金曜引け価格のキャッシュ (key: coin@ms)
+
+
+def _hl_post(body: dict, timeout: int = 8) -> Optional[Any]:
+    """例外を外に投げない Hyperliquid info POST ラッパ"""
+    try:
+        r = requests.post(HL_INFO_URL, json=body, timeout=timeout,
+                          headers={"Content-Type": "application/json", "User-Agent": _UA})
+        if r.status_code == 200:
+            return r.json()
+    except Exception:
+        pass
+    return None
+
+
+def _et_tz(now_utc: Optional[datetime] = None) -> timezone:
+    """米国東部時間 (夏時間: 3月第2日曜〜11月第1日曜 は UTC-4、それ以外 UTC-5)"""
+    now = now_utc or datetime.now(timezone.utc)
+    y = now.year
+    mar1 = datetime(y, 3, 1, tzinfo=timezone.utc)
+    dst_start = mar1 + timedelta(days=(6 - mar1.weekday()) % 7 + 7, hours=7)   # 2:00 EST = 7:00 UTC
+    nov1 = datetime(y, 11, 1, tzinfo=timezone.utc)
+    dst_end = nov1 + timedelta(days=(6 - nov1.weekday()) % 7, hours=6)         # 2:00 EDT = 6:00 UTC
+    return timezone(timedelta(hours=-4 if dst_start <= now < dst_end else -5))
+
+
+def _last_us_friday_close(now_utc: Optional[datetime] = None) -> datetime:
+    """直近 (過去) の 金曜 16:00 ET = 米国株の引け を UTC で返す"""
+    now = now_utc or datetime.now(timezone.utc)
+    et = now.astimezone(_et_tz(now))
+    back = (et.weekday() - 4) % 7               # 金曜=4
+    fri = (et - timedelta(days=back)).replace(hour=16, minute=0, second=0, microsecond=0)
+    if fri > et:
+        fri -= timedelta(days=7)
+    # 金曜時点の夏時間/冬時間で付け直す (DST切替週の誤差対策)
+    fri_naive = fri.replace(tzinfo=None)
+    tz_fri = _et_tz((fri_naive + timedelta(hours=5)).replace(tzinfo=timezone.utc))
+    return fri_naive.replace(tzinfo=tz_fri).astimezone(timezone.utc)
+
+
+def _dex_friday_close(coin: str, fri_close_utc: datetime) -> Optional[float]:
+    """DEX上の、金曜引け直前 (15時台ET) の1時間足の終値"""
+    end_ms = int(fri_close_utc.timestamp() * 1000)
+    key = f"{coin}@{end_ms}"
+    if key in _DEX_BASE_CACHE:
+        return _DEX_BASE_CACHE[key]
+    candles = _hl_post({
+        "type": "candleSnapshot",
+        "req": {"coin": coin, "interval": "1h",
+                "startTime": end_ms - 6 * 3600 * 1000, "endTime": end_ms},
+    })
+    if not isinstance(candles, list):
+        return None
+    best = None
+    for c in candles:
+        try:
+            t = int(c.get("t"))
+            if end_ms - 2 * 3600 * 1000 <= t < end_ms and (best is None or t > best[0]):
+                best = (t, float(c.get("c")))
+        except Exception:
+            continue
+    if best and best[1] > 0:
+        _DEX_BASE_CACHE[key] = best[1]
+        return best[1]
+    return None
+
+
+def _fetch_dex_weekend() -> Dict[str, Any]:
+    """
+    DEX から土日カード用の値を取る。
+    戻り値: {"items": {key: {...}}, "error": str|None, "base_time": "MM/DD HH:MM ET"}
+    各 item: {"label", "coin", "current", "base", "change", "change_pct", "digits", "status"}
+      status: "ok" / "nobase" (現在値のみ) / "suspect" (値が不自然→非表示) / "missing" (銘柄なし)
+    """
+    res = _hl_post({"type": "metaAndAssetCtxs", "dex": HL_DEX})
+    if not (isinstance(res, list) and len(res) >= 2):
+        return {"items": {}, "error": "DEXから取得できませんでした", "base_time": None}
+
+    universe = (res[0] or {}).get("universe") or []
+    ctxs = res[1] or []
+    by_name: Dict[str, Tuple[str, dict]] = {}
+    for u, c in zip(universe, ctxs):
+        name = str(u.get("name", ""))
+        if u.get("isDelisted"):
+            continue
+        short = name.split(":", 1)[-1].upper()
+        by_name[short] = (name, c or {})
+
+    fri_close = _last_us_friday_close()
+    items: Dict[str, Any] = {}
+    for key, label, names, digits in _DEX_ITEMS:
+        hit = next((by_name[n.upper()] for n in names if n.upper() in by_name), None)
+        if not hit:
+            items[key] = {"label": label, "status": "missing", "digits": digits}
+            continue
+        coin, ctx = hit
+        try:
+            cur = float(ctx.get("markPx") or ctx.get("midPx") or ctx.get("oraclePx"))
+        except (TypeError, ValueError):
+            cur = None
+        if not cur or cur <= 0:
+            items[key] = {"label": label, "status": "missing", "digits": digits}
+            continue
+        base = _dex_friday_close(coin, fri_close)
+        inv = key == "usdjpy" and cur < 1          # JPY/USD 表記ならドル円に換算
+        if inv:
+            cur = 1 / cur
+            base = (1 / base) if base else None
+        item = {"label": label, "coin": coin, "current": cur, "base": base,
+                "digits": digits, "status": "nobase"}
+        if base:
+            chg = cur - base
+            pct = chg / base * 100.0
+            item.update({"change": chg, "change_pct": pct, "status": "ok"})
+            if abs(pct) / 100.0 > _DEX_MAX_MOVE.get(key, 0.10):
+                item["status"] = "suspect"          # 間違った数字は出さない
+        items[key] = item
+
+    fri_et = fri_close.astimezone(_et_tz(fri_close))
+    return {"items": items, "error": None,
+            "base_time": fri_et.strftime("%m/%d %H:%M ET")}
+
+
+# =====================================================
 # (3) Yahoo Finance による再計算
 #     - JP225 を JST 15:30 基準で再計算
 #     - US100 を ET 16:00 基準で再計算
@@ -733,14 +880,13 @@ def fetch_synthetic_fx() -> Dict[str, Any]:
 
         is_we = _is_weekend_jst()
 
-        # 土日のみ: 合成USDJPY (sekai-kabuka は金曜終値を取った後で取得する)
-        synth_usdjpy = None
-        sekai_result: Dict[str, Any] = {"data": {}, "error": None, "url": None}
+        # 土日のみ: DEX (Hyperliquid / trade[XYZ]) から土日の価格を取得
+        dex_result: Dict[str, Any] = {"items": {}, "error": None, "base_time": None}
         if is_we:
             try:
-                synth_usdjpy = _compute_synth_usdjpy()
+                dex_result = _fetch_dex_weekend()
             except Exception as e:
-                synth_usdjpy = {"value": None, "error": f"例外: {type(e).__name__}"}
+                dex_result = {"items": {}, "error": f"例外: {type(e).__name__}", "base_time": None}
 
         # 平日も土日も: Yahoo経由の再計算
         recalc: Dict[str, Optional[dict]] = {"jp225": None, "us100": None, "usdjpy": None}
@@ -757,61 +903,14 @@ def fetch_synthetic_fx() -> Dict[str, Any]:
         except Exception:
             pass
 
-        # ★ 土日の前日比%計算用: 金曜終値を別取得 (^DJI, ^NDX, CL=F, JPY=X)
-        # recalcのanchorは「直近の(JST15:30 or ET16:00)時刻のバー」を取るので
-        # 土日にはそれが金曜終値になり、これを「金曜終値」として使う。
-        # NDX/USDJPYはrecalcに既に入っているので流用、Dow/原油は新規取得。
-        prev_closes: Dict[str, Optional[float]] = {
-            "dow":    None,
-            "nas100": None,
-            "oil":    None,
-            "usdjpy": None,
-        }
-        if is_we:
-            try:
-                _dji = _compute_recalc("^DJI", 16, 0, "ET")
-                if _dji and _dji.get("anchor"):
-                    prev_closes["dow"] = float(_dji["anchor"])
-            except Exception:
-                pass
-            try:
-                # WTI Crude Oil Futures (NYMEX)。市場開いてる時の最新値=金曜終値相当
-                _oil = _compute_recalc("CL=F", 16, 0, "ET")
-                if _oil and _oil.get("anchor"):
-                    prev_closes["oil"] = float(_oil["anchor"])
-            except Exception:
-                pass
-            # NAS100とUSDJPYは既に取得済みのrecalcから流用
-            try:
-                if recalc.get("us100") and recalc["us100"].get("anchor"):
-                    prev_closes["nas100"] = float(recalc["us100"]["anchor"])
-            except Exception:
-                pass
-            try:
-                if recalc.get("usdjpy") and recalc["usdjpy"].get("anchor"):
-                    prev_closes["usdjpy"] = float(recalc["usdjpy"]["anchor"])
-            except Exception:
-                pass
-
-            # ★ sekai-kabuka は金曜終値を「基準値」として渡して取得する
-            #   (基準から大きく外れた値 = 別銘柄を拾った値 は表示しない)
-            try:
-                sekai_result = _fetch_sekai_indices(prev_closes)
-            except Exception as e:
-                sekai_result = {"data": {}, "error": f"例外: {type(e).__name__}", "url": None}
-
         # 現在JST時刻
         nowjst = _now_jst()
         data = {
             "is_weekend": is_we,
-            "synth_usdjpy": synth_usdjpy,
-            "sekai": sekai_result.get("data", {}),
-            "sekai_error": sekai_result.get("error"),
-            "sekai_url": sekai_result.get("url"),
-            "sekai_url_source": sekai_result.get("url_source", "n/a"),
-            "sekai_rejected": sekai_result.get("rejected", {}),
+            "dex": dex_result.get("items", {}),
+            "dex_error": dex_result.get("error"),
+            "dex_base_time": dex_result.get("base_time"),
             "recalc": recalc,
-            "prev_closes": prev_closes,
             "as_of": nowjst.strftime("%H:%M:%S JST"),
             "now_jst": nowjst.strftime("%Y/%m/%d (%a) %H:%M:%S JST"),
         }
@@ -834,7 +933,6 @@ def render_synthetic_fx(data: Dict[str, Any]) -> None:
     if not data:
         return
     is_we = data.get("is_weekend", False)
-    sekai_rejected = data.get("sekai_rejected") or {}
 
     def _checking_card(label: str) -> str:
         """取得値が金曜終値から外れすぎて捨てた時の「確認中」カード (間違った数字は出さない)"""
@@ -846,12 +944,6 @@ def render_synthetic_fx(data: Dict[str, Any]) -> None:
             f'</div>'
         )
     recalc = data.get("recalc") or {}
-    synth = data.get("synth_usdjpy")
-    sekai = data.get("sekai") or {}
-    # __debug__ キーが残っていれば取り除く（renderには出さない）
-    if isinstance(sekai, dict):
-        sekai.pop("__debug__", None)
-    sekai_error = data.get("sekai_error")
     now_jst = data.get("now_jst", "")
 
     # ================================================
@@ -894,108 +986,43 @@ def render_synthetic_fx(data: Dict[str, Any]) -> None:
     )
 
     # ================================================
-    # 2段目: 土日カード (is_weekendがTrueの時のみ表示・失敗時は理由表示)
-    # 並び順: ① ダウ → ② NASDAQ100 → ③ ドル円(合成) → ④ VIX
+    # 2段目: 土日カード (is_weekendがTrueの時のみ表示・失敗時は「確認中」)
+    # 並び順: ① ウィークエンドSP500 → ② ウィークエンドNASDAQ100 → ③ ウィークエンドドル円 → ④ ウィークエンド原油   (DEX: trade[XYZ])
+    # 変化は「米国金曜の引け (NY16:00)」比
     # ================================================
     weekend_row = ""
     if is_we:
-        prev_closes = data.get("prev_closes") or {}
-
-        def _chg_html(current_val: float, prev_close: Optional[float]) -> str:
-            """金曜終値からの変化金額と変化率をHTMLで返す。出所表記は付けない。"""
-            if not prev_close or prev_close <= 0 or not current_val:
-                return ''
-            chg = current_val - prev_close
-            pct = (chg / prev_close) * 100.0
-            color = "#1aaa55" if chg >= 0 else "#d32f2f"
-            sign = "+" if chg >= 0 else ""
-            return (
-                f'<div class="syn-chg" style="color:{color};">'
-                f'{sign}{chg:,.2f} ({sign}{pct:.2f}%)'
-                f'</div>'
-            )
-
-        # ── ① 土日ダウ
-        if sekai and "dow" in sekai:
-            lo = sekai["dow"]["low"]
-            hi = sekai["dow"]["high"]
-            # SVGから抽出した現在値があればそれを、なければレンジ中央値
-            cur = sekai["dow"].get("current")
-            display_val = cur if cur is not None else (lo + hi) / 2
-            chg_html = _chg_html(display_val, prev_closes.get("dow"))
+        dex = data.get("dex") or {}
+        for key, label, _names, _digits in _DEX_ITEMS:
+            it = dex.get(key)
+            if not it or it.get("status") in ("missing", "suspect"):
+                weekend_row += _checking_card(label)
+                continue
+            d = it.get("digits", 2)
+            cur = it["current"]
+            chg_html = ""
+            base_html = ""
+            if it.get("status") == "ok":
+                chg = it["change"]
+                pct = it["change_pct"]
+                color = "#1aaa55" if chg >= 0 else "#d32f2f"
+                sign = "+" if chg >= 0 else ""
+                chg_html = (
+                    f'<div class="syn-chg" style="color:{color};">'
+                    f'{sign}{chg:,.{d}f} ({sign}{pct:.2f}%)</div>'
+                )
+                base_html = f'<div class="syn-sub">金曜引け {it["base"]:,.{d}f}</div>'
+            else:
+                base_html = '<div class="syn-sub">金曜引けの値を確認中</div>'
             weekend_row += (
                 f'<div class="syn-card syn-weekend">'
-                f'<div class="syn-label">🇺🇸 土日ダウ</div>'
-                f'<div class="syn-value">{display_val:,.2f}</div>'
-                f'{chg_html}'
-                f'</div>'
-            )
-        elif sekai or "dow" in sekai_rejected:   # 取れなかった/外れ値を捨てた時は「確認中」
-            weekend_row += _checking_card("🇺🇸 土日ダウ")
-
-        # ── ② 土日NASDAQ100
-        if sekai and "nas100" in sekai:
-            lo = sekai["nas100"]["low"]
-            hi = sekai["nas100"]["high"]
-            cur = sekai["nas100"].get("current")
-            display_val = cur if cur is not None else (lo + hi) / 2
-            chg_html = _chg_html(display_val, prev_closes.get("nas100"))
-            weekend_row += (
-                f'<div class="syn-card syn-weekend">'
-                f'<div class="syn-label">🇺🇸 土日NASDAQ100</div>'
-                f'<div class="syn-value">{display_val:,.2f}</div>'
-                f'{chg_html}'
-                f'</div>'
-            )
-        elif sekai or "nas100" in sekai_rejected:   # 取れなかった/外れ値を捨てた時は「確認中」
-            weekend_row += _checking_card("🇺🇸 土日NASDAQ100")
-
-        # ── ③ 土日ドル円
-        if synth and synth.get("value"):
-            v = synth["value"]
-            chg_html = _chg_html(v, prev_closes.get("usdjpy"))
-            weekend_row += (
-                f'<div class="syn-card syn-weekend">'
-                f'<div class="syn-label">💴 土日ドル円</div>'
-                f'<div class="syn-value">{v:,.3f}</div>'
-                f'{chg_html}'
-                f'</div>'
-            )
-        elif synth and synth.get("error"):
-            weekend_row += (
-                f'<div class="syn-card syn-weekend syn-dim">'
-                f'<div class="syn-label">💴 土日ドル円</div>'
-                f'<div class="syn-value">--</div>'
+                f'<div class="syn-label">{label}</div>'
+                f'<div class="syn-value">{cur:,.{d}f}</div>'
+                f'{chg_html}{base_html}'
                 f'</div>'
             )
 
-        # ── ④ 土日原油
-        if sekai and "oil" in sekai:
-            lo = sekai["oil"]["low"]
-            hi = sekai["oil"]["high"]
-            cur = sekai["oil"].get("current")
-            display_val = cur if cur is not None else (lo + hi) / 2
-            chg_html = _chg_html(display_val, prev_closes.get("oil"))
-            weekend_row += (
-                f'<div class="syn-card syn-weekend">'
-                f'<div class="syn-label">🛢 土日原油</div>'
-                f'<div class="syn-value">{display_val:,.2f}</div>'
-                f'{chg_html}'
-                f'</div>'
-            )
-        elif sekai or "oil" in sekai_rejected:   # 取れなかった/外れ値を捨てた時は「確認中」
-            weekend_row += _checking_card("🛢 土日原油")
-
-        # sekai 全滅時のエラーカード (出所文言なし)
-        if (not sekai) and sekai_error and not sekai_rejected:
-            weekend_row += (
-                f'<div class="syn-card syn-weekend syn-dim">'
-                f'<div class="syn-label">🌐 株価指数</div>'
-                f'<div class="syn-value">--</div>'
-                f'</div>'
-            )
-
-        if not weekend_row:
+        if not dex:
             weekend_row = (
                 f'<div class="syn-card syn-weekend syn-dim">'
                 f'<div class="syn-label">土日機能</div>'
@@ -1008,29 +1035,13 @@ def render_synthetic_fx(data: Dict[str, Any]) -> None:
     # ================================================
     # 出力
     # ================================================
-    sekai_url_source = data.get("sekai_url_source", "n/a")
-    # データソースのバッジ (色分けで状態が一目で分かる)
-    src_color = {
-        "auto":   "#1565c0",  # 青: GitHub Actionsで自動取得した最新URL (最良)
-        "html":   "#2e7d32",  # 緑: ページHTMLから直接抽出 (次に良い)
-        "manual": "#ef6c00",  # オレンジ: 手動URL使用中(古い可能性)
-        "cache":  "#c62828",  # 赤: 前回URL再利用(かなり古い可能性)
-        "none":   "#9e9e9e",  # グレー: 未取得
-        "n/a":    "#9e9e9e",
-    }.get(sekai_url_source, "#9e9e9e")
-    src_label = {
-        "auto":   "🔄 自動更新",
-        "html":   "HTML抽出",
-        "manual": "手動URL",
-        "cache":  "古い",
-        "none":   "未取得",
-        "n/a":    "",
-    }.get(sekai_url_source, sekai_url_source)
+    # データソースのバッジ
     badge = (
-        f'<span style="background:{src_color};color:#fff;font-size:9px;'
-        f'padding:1px 6px;border-radius:3px;margin-left:6px;font-weight:600;">'
-        f'{src_label}</span>'
-    ) if src_label else ""
+        '<span style="background:#1565c0;color:#fff;font-size:9px;'
+        'padding:1px 6px;border-radius:3px;margin-left:6px;font-weight:600;">'
+        '🔄 自動更新</span>'
+    ) if (data.get("dex") and not data.get("dex_error")) else ""
+    base_time = data.get("dex_base_time") or ""
 
     # 平日に案内メッセージを表示するためのフォールバック
     weekend_html_block = (
@@ -1038,7 +1049,7 @@ def render_synthetic_fx(data: Dict[str, Any]) -> None:
         '<div class="syn-weekend-title">📅 土日モード</div>'
         '<div style="font-size:13px;color:#444;padding:10px 8px;">'
         '日本時間の土曜 7:00am 〜 月曜 7:00am になると、'
-        '<b>土日ダウ</b>・<b>土日NASDAQ</b>・<b>土日原油</b>・<b>土日ドル円</b> が表示されます。'
+        '<b>ウィークエンドSP500</b>・<b>ウィークエンドNASDAQ100</b>・<b>ウィークエンドドル円</b>・<b>ウィークエンド原油</b> が表示されます。'
         '</div>'
         '</div>'
     )
@@ -1046,7 +1057,7 @@ def render_synthetic_fx(data: Dict[str, Any]) -> None:
     weekend_html = (
         f'<div class="syn-wrap syn-weekend-wrap">'
         f'<div class="syn-weekend-title">📅 土日モード ({now_jst}){badge}</div>'
-        f'<div class="syn-weekend-subtitle">土日に動く為替と株価指数です。参考値です。</div>'
+        f'<div class="syn-weekend-subtitle">土日も取引されているDEX（trade[XYZ]）の価格です。変化は米国金曜の引け（{base_time}）比。参考値です。</div>'
         f'<div class="syn-wrap" style="margin:0;">{weekend_row}</div>'
         f'</div>'
     ) if weekend_row else weekend_html_block
