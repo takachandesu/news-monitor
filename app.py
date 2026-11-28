@@ -4656,7 +4656,7 @@ except Exception:
 #   画面が狭いとき(スマホ等)は Streamlit が自動で縦並びにし、凡例はニュースの下に回る。
 # -----------------------------
 NEWS_COLOR_LEGEND_HTML = """
-<div style="border:1px solid rgba(128,128,128,0.3);border-radius:8px;padding:8px 10px;margin-bottom:8px;font-size:14px;line-height:1.7;">
+<div style="border:1px solid rgba(128,128,128,0.3);border-radius:8px;padding:8px 10px;margin-bottom:8px;font-size:13px;line-height:1.75;white-space:nowrap;overflow:hidden;">
   <div style="font-weight:bold;margin-bottom:2px;">🎨 文字色の意味</div>
   <div><span style="color:#d32f2f;font-weight:bold;">赤（太字）</span>：速報</div>
   <div><span style="color:#1976d2;font-weight:600;">青</span>：Bloomberg</div>
@@ -4666,7 +4666,8 @@ NEWS_COLOR_LEGEND_HTML = """
   <div><span>黒（細字）</span>：その他</div>
 </div>
 """
-_news_col, _legend_col = st.columns([5, 1], gap="small")
+# 各色は 1 行に収める (white-space:nowrap)。凡例列は細めにしてニュース欄を広く取る
+_news_col, _legend_col = st.columns([6, 1], gap="small")
 with _legend_col:
     st.markdown(NEWS_COLOR_LEGEND_HTML, unsafe_allow_html=True)
 with _news_col:
