@@ -3604,21 +3604,6 @@ def fetch_all_sources(collector: BackgroundCollector) -> Dict[str, object]:
 st.title("News Headline Monitor")
 st.caption("見出し＋リンクのみを取得します（本文は取得しません）。")
 
-# ★ 2026/11/28: 見出しの文字色の意味（凡例）をサイドバー先頭に表示
-st.sidebar.markdown(
-    """
-<div style="border:1px solid rgba(128,128,128,0.3);border-radius:8px;padding:8px 10px;margin-bottom:8px;font-size:14px;line-height:1.7;">
-  <div style="font-weight:bold;margin-bottom:2px;">🎨 文字色の意味</div>
-  <div><span style="color:#d32f2f;font-weight:bold;">赤（太字）</span>：速報</div>
-  <div><span style="color:#1976d2;font-weight:600;">青</span>：Bloomberg</div>
-  <div><span style="color:#16a34a;font-weight:600;">緑</span>：ロイター</div>
-  <div><span style="color:#7b1fa2;font-weight:bold;">紫（太字）</span>：為替の話題</div>
-  <div><span style="font-weight:bold;">黒（太字）</span>：株式の話題</div>
-  <div><span>黒（細字）</span>：その他</div>
-</div>
-""",
-    unsafe_allow_html=True,
-)
 st.sidebar.header("設定")
 
 # ★デフォルト45秒 (2026/10/13 変更)
@@ -4666,5 +4651,23 @@ except Exception:
 
 # -----------------------------
 # Render: 常に「All（全部まとめ）」のニュース一覧のみ表示
+# ★ 2026/11/28: ニュース欄の右側に見出しの文字色の意味（凡例）を表示。
+#   HP 埋め込み・別タブ共通（埋め込みではサイドバーが見えないため右側に置く）。
+#   画面が狭いとき(スマホ等)は Streamlit が自動で縦並びにし、凡例はニュースの下に回る。
 # -----------------------------
-_render_news_fragment("all_full")
+NEWS_COLOR_LEGEND_HTML = """
+<div style="border:1px solid rgba(128,128,128,0.3);border-radius:8px;padding:8px 10px;margin-bottom:8px;font-size:14px;line-height:1.7;">
+  <div style="font-weight:bold;margin-bottom:2px;">🎨 文字色の意味</div>
+  <div><span style="color:#d32f2f;font-weight:bold;">赤（太字）</span>：速報</div>
+  <div><span style="color:#1976d2;font-weight:600;">青</span>：Bloomberg</div>
+  <div><span style="color:#16a34a;font-weight:600;">緑</span>：ロイター</div>
+  <div><span style="color:#7b1fa2;font-weight:bold;">紫（太字）</span>：為替の話題</div>
+  <div><span style="font-weight:bold;">黒（太字）</span>：株式の話題</div>
+  <div><span>黒（細字）</span>：その他</div>
+</div>
+"""
+_news_col, _legend_col = st.columns([5, 1], gap="small")
+with _legend_col:
+    st.markdown(NEWS_COLOR_LEGEND_HTML, unsafe_allow_html=True)
+with _news_col:
+    _render_news_fragment("all_full")
