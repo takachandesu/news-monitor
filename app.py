@@ -3044,6 +3044,17 @@ def render_items(items: List[Dict], limit: int, show_source: bool, show_time: bo
             padding: 0;
         }}
         #nq-clear:hover {{ background: var(--btn-bg); color: var(--fg); }}
+        /* ★ 2026/11/28: HP 埋め込み時だけ、検索欄の左に「別タブでフルスクリーン表示」リンクを出す */
+        #nq-full {{
+            flex: 0 0 auto;
+            display: none;
+            font-size: 13px;
+            color: #1a73e8;
+            text-decoration: none;
+            white-space: nowrap;
+        }}
+        #nq-full:hover {{ text-decoration: underline; }}
+        #nq-full.is-embed {{ display: inline; }}
         #nq-count {{
             flex: 0 0 auto;
             font-size: 12px;
@@ -3152,6 +3163,7 @@ def render_items(items: List[Dict], limit: int, show_source: bool, show_time: bo
         </style>
         <div id="news-box">
           <div id="news-search">
+            <a id="nq-full" href="https://my-news-monitor.streamlit.app/" target="_blank" rel="noopener">↗ 別タブでフルスクリーン表示</a>
             <div class="nsearch-field">
               <svg viewBox="0 0 24 24" fill="none" stroke-width="2.4" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
               <input id="nq" type="text" enterkeyhint="search" autocomplete="off" spellcheck="false"
@@ -3177,6 +3189,14 @@ def render_items(items: List[Dict], limit: int, show_source: bool, show_time: bo
             const qInput   = document.getElementById('nq');
             const qClear   = document.getElementById('nq-clear');
             const qCount   = document.getElementById('nq-count');
+
+            // ★ HP(WordPress) に埋め込まれているときだけフルスクリーンリンクを表示。
+            //   この部品自体が iframe なので、親(Streamlit)がさらに別ページ内にあれば埋め込み中と判定。
+            try {{
+                if (window.parent !== window.top) {{
+                    document.getElementById('nq-full').classList.add('is-embed');
+                }}
+            }} catch(e) {{}}
 
             const viewItems = ITEMS.slice(0, VIEW_N);
             const restItems = ITEMS.slice(VIEW_N);   // 検索時だけ使う、表示件数より古い見出し
