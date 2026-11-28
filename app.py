@@ -4663,10 +4663,6 @@ NEWS_COLOR_LEGEND_HTML = """
   div[data-testid="stColumn"]:has(.news-legend), div.stColumn:has(.news-legend), div[data-testid="column"]:has(.news-legend) {
     flex: 0 0 180px !important; width: 180px !important; min-width: 180px !important; max-width: 180px !important;
   }
-  .stApp.streamlit-embedded div[data-testid="stHorizontalBlock"]:has(.news-legend),
-  .stApp.streamlit-embedded div.stHorizontalBlock:has(.news-legend) {
-    align-items: flex-end !important;
-  }
   div[data-testid="stHorizontalBlock"]:has(.news-legend) > div:first-child,
   div.stHorizontalBlock:has(.news-legend) > div:first-child {
     flex: 1 1 0 !important; width: auto !important; min-width: 0 !important;
@@ -4684,10 +4680,7 @@ NEWS_COLOR_LEGEND_HTML = """
 </div>
 """
 # 各色は 1 行に収める (white-space:nowrap)。凡例列は細めにしてニュース欄を広く取る
-#   ・別タブ: 凡例はニュース欄の右上
-#   ・HP 埋め込み (?embed=true): ニュースを左、凡例の枠は右の一番下 (底) にそろえる
-#     (embed は st.query_params から読めないため、Streamlit が埋め込み時に .stApp へ付ける
-#      "streamlit-embedded" クラスを使って CSS で切り替える)
+#   凡例は HP 埋め込み・別タブとも、ニュース欄の右上
 _news_col, _legend_col = st.columns([6, 1], gap="small")
 with _legend_col:
     st.markdown(NEWS_COLOR_LEGEND_HTML, unsafe_allow_html=True)
